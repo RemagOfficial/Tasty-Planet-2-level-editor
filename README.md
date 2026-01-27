@@ -71,9 +71,11 @@ To create a custom level for Tasty Planet Back for Seconds:
 
 2. Edit the resulting `dino5_data.json` file to customize the level (modify entities, decorations, walls, paths, etc.)
 
-3. Convert the modified JSON back to binary format:
+3. Convert the modified JSON back to binary format with the **same filename** as the original level:
    ```bash
-   python write_level.py dino5_data.json my_custom_level.bin
+   python write_level.py dino5_data.json dino5.bin
    ```
 
-4. Place the resulting `my_custom_level.bin` file in your game's levels folder to use it!
+4. Replace the original level file in your game's levels folder with your custom `dino5.bin` to use it in-game!
+
+**Note:** Custom levels must match the filename of an existing vanilla level to work in-game. The custom level will replace the vanilla level when you play.
