@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files and temporary outputs
+*_data.json
+*.bin_rebuilt
+*_read_verbose.log
+*_rebuilt_verbose.log
+*_rebuilt_verbose.bin

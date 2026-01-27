@@ -157,3 +157,57 @@ Use the verbose scripts when:
 - You want to compare the binary structure of different level files
 
 For normal usage, the standard `read_level.py` and `write_level.py` scripts are sufficient and more performant.
+
+## Rebuild Level Script (rebuild_level.py)
+
+The `rebuild_level.py` script is a verification tool that ensures both reading and writing level files work correctly. It performs a complete round-trip conversion to validate data integrity.
+
+### Purpose
+
+This helper script is essential for testing and verification because it:
+- Validates that `read_level.py` correctly extracts all data from binary level files
+- Validates that `write_level.py` correctly encodes all data back to binary format
+- Ensures no data is lost or corrupted during the conversion process
+- Helps catch bugs in either the reading or writing implementation
+- Provides confidence that custom levels will work in-game
+
+### How It Works
+
+The script performs these steps automatically:
+
+1. **Read**: Converts the input binary level file to JSON using `read_level.py`
+2. **Write**: Converts the JSON back to binary using `write_level.py`
+3. **Output**: Creates a rebuilt binary file (with a different name to avoid overwriting)
+4. **Cleanup**: Optionally deletes the intermediate JSON file
+
+### Usage
+
+```bash
+python rebuild_level.py <level_file.bin>
+```
+
+### Example
+
+```bash
+python rebuild_level.py levels/dino5.bin
+```
+
+### Output
+
+The script will:
+- Create `dino5_data.json` (the intermediate JSON representation)
+- Create `dino5(1).bin` (the rebuilt binary file, numbered to avoid conflicts)
+- Prompt you whether to delete the temporary JSON file
+
+### Verification
+
+If the rebuilt binary file functions identically to the original in-game, you can be confident that:
+- The reading implementation correctly parses all level data
+- The writing implementation correctly encodes all level data
+- No information is lost during the round-trip conversion
+
+This is particularly useful when:
+- Developing new features in the parser
+- Fixing bugs in reading or writing logic
+- Testing with different level files to ensure broad compatibility
+- Verifying that custom level modifications will work correctly
