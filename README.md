@@ -79,3 +79,81 @@ To create a custom level for Tasty Planet Back for Seconds:
 4. Replace the original level file in your game's levels folder with your custom `dino5.bin` to use it in-game!
 
 **Note:** Custom levels must match the filename of an existing vanilla level to work in-game. The custom level will replace the vanilla level when you play.
+
+## Verbose Scripts
+
+For debugging and advanced usage, verbose versions of both scripts are available. These scripts create detailed log files that track every byte read or written during the parsing/writing process.
+
+### read_level_verbose.py
+
+This is a verbose version of `read_level.py` that generates a detailed log file alongside the JSON output.
+
+#### Usage
+
+```bash
+python read_level_verbose.py <level_file.bin>
+```
+
+#### Example
+
+```bash
+python read_level_verbose.py levels/dino5.bin
+```
+
+#### Output
+
+In addition to creating the standard `<level_file_name>_data.json` file, this script also generates:
+- `<level_file_name>_read_verbose.log` - A detailed log file containing:
+  - Byte offsets (hex addresses) for every data structure
+  - Raw byte values for each field read
+  - Human-readable interpretations of the data
+  - Timing information for the parsing process
+
+This log file is invaluable for:
+- Debugging level parsing issues
+- Understanding the binary format structure
+- Verifying that data is being read correctly
+- Reverse engineering the level file format
+
+### write_level_verbose.py
+
+This is a verbose version of `write_level.py` that generates a detailed log file during the binary writing process.
+
+#### Usage
+
+```bash
+python write_level_verbose.py <level_data.json>
+```
+
+#### Example
+
+```bash
+python write_level_verbose.py dino5_data.json
+```
+
+#### Output
+
+This script creates:
+- `<level_name>_rebuilt_verbose.bin` - The binary level file
+- `<level_name>_rebuilt_verbose.log` - A detailed log file containing:
+  - Byte offsets (hex addresses) where each data structure was written
+  - Raw byte values written for each field
+  - Human-readable descriptions of what was written
+  - Timing information for the writing process
+
+This log file is useful for:
+- Debugging level writing issues
+- Verifying the output binary matches expectations
+- Comparing write logs with read logs to ensure round-trip accuracy
+- Understanding how JSON data is converted back to binary format
+
+### When to Use Verbose Scripts
+
+Use the verbose scripts when:
+- You encounter errors or unexpected behavior with level parsing/writing
+- You're trying to understand the binary format structure in detail
+- You need to verify that specific data is being read or written correctly
+- You're developing new features or fixing bugs in the parser
+- You want to compare the binary structure of different level files
+
+For normal usage, the standard `read_level.py` and `write_level.py` scripts are sufficient and more performant.
