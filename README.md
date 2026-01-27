@@ -194,12 +194,14 @@ python rebuild_level.py levels/dino5.bin
 
 ### Output
 
-The script will:
-- Create `dino5_data.json` (the intermediate JSON representation)
-- Create a rebuilt binary file with an automatically chosen name to avoid overwriting:
-  - `dino5.bin` if no file with that name exists in the current directory
-  - `dino5(1).bin`, `dino5(2).bin`, etc. if a naming conflict occurs
+When you run `python rebuild_level.py levels/dino5.bin`, the script will:
+- Create `dino5_data.json` in the current directory (the intermediate JSON representation)
+- Create a rebuilt binary file in the current directory with an automatically chosen name:
+  - `dino5.bin` (if no file with that name exists in the current directory and it won't conflict with the input)
+  - `dino5(1).bin`, `dino5(2).bin`, etc. (if there's a naming conflict)
 - Prompt you whether to delete the temporary JSON file
+
+**Note:** The rebuilt file is always created in the current directory (where you run the script), not in the input file's directory.
 
 ### Verification
 
