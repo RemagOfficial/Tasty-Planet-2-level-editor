@@ -1,24 +1,19 @@
 import struct
-import math
-import sys
 import json
-import time
-from datetime import datetime
+import sys
 from pathlib import Path
+from datetime import datetime
 
 # --- LOGGING SETUP ---
 class Logger:
-    def __init__(self, log_path=None, verbose_console=False):
+    def __init__(self, log_path=None):
         self.log_file = None
-        self.verbose_console = verbose_console
         if log_path:
             self.log_file = open(log_path, 'w', encoding='utf-8')
     
     def log(self, message):
         timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
         full_message = f"{timestamp} {message}"
-        if self.verbose_console:
-            print(full_message)
         if self.log_file:
             self.log_file.write(full_message + '\n')
             self.log_file.flush()
@@ -27,226 +22,264 @@ class Logger:
         if self.log_file:
             self.log_file.close()
 
-# Initial logger
-logger = Logger()
+def pack_string(s, logger, desc=""):
+    pos_before = None # We'll get this from the file handle
+    if s is None:
+        return struct.pack('<i', 0)
+    encoded = s.encode('ascii') + b'\x00'
+    res = struct.pack('<i', len(encoded)) + encoded
+    return res
 
-def write_string(f, s):
-    pos = f.tell()
-    # Game expects null terminator in the length-prefixed bytes
-    bytes_val = s.encode('ascii') + b'\x00'
-    length = len(bytes_val)
-    length_bytes = struct.pack('<i', length)
-    f.write(length_bytes)
-    f.write(bytes_val)
-    logger.log(f"  0x{pos:X}: Wrote string '{s}' (len {length}) bytes: {length_bytes.hex()} + {bytes_val.hex()}")
+def write_level(data, output_path, logger):
+    with open(output_path, 'wb') as f:
+        def log_write(pos, n, desc, val):
+            logger.log(f"0x{pos:X}: Wrote {n} bytes ({desc}) -> {val}")
 
-# Check for CLI argument
-if len(sys.argv) < 2:
-    print("Usage: python write_level_verbose.py <level_data.json>")
-    print("Example: python write_level_verbose.py dino5_data.json")
-    sys.exit(1)
+        def write_packed(fmt, val, desc):
+            pos = f.tell()
+            packed = struct.pack(fmt, val)
+            f.write(packed)
+            log_write(pos, len(packed), desc, val)
 
-json_path = Path(sys.argv[1])
-if not json_path.exists():
-    print(f"Error: File not found: {json_path}")
-    sys.exit(1)
+        def write_str(s, desc):
+            pos = f.tell()
+            packed = pack_string(s, logger, desc)
+            f.write(packed)
+            logger.log(f"0x{pos:X}: Wrote string ({desc}) -> '{s}'")
 
-with open(json_path, 'r') as jf:
-    data = json.load(jf)
+        # Header
+        write_packed('<i', data.get('dummy', 0), "header dummy")
+        write_packed('<i', data.get('tileTypeCount', 0), "tileTypeCount")
 
-# Cleaned up log filename: [level]_rebuilt_verbose.log
-level_name = json_path.name.replace("_data.json", "")
-output_bin = Path(json_path.parent / f"{level_name}_rebuilt_verbose.bin")
-logger = Logger(output_bin.parent / f"{level_name}_rebuilt_verbose.log")
-start_time = time.time()
+        # 1. Tile Types
+        for i, tile in enumerate(data.get('tileTypes', [])):
+            write_str(tile.get('value', ''), f"tileType[{i}]")
 
-with open(output_bin, 'wb') as f:
-    logger.log(f"Writing to {output_bin.name}...")
-    
-    # Header
-    pos = f.tell()
-    dummy_bytes = struct.pack('<i', data['dummy'])
-    f.write(dummy_bytes)
-    logger.log(f"0x{pos:X}: Wrote int32 (dummy) = {data['dummy']} (bytes {dummy_bytes.hex()})")
+        # Layers
+        layer_count = data.get('layerCount', 0)
+        write_packed('<i', layer_count, "layerCount")
 
-    pos = f.tell()
-    count_bytes = struct.pack('<i', data['tileTypeCount'])
-    f.write(count_bytes)
-    logger.log(f"0x{pos:X}: Wrote int32 (tileTypeCount) = {data['tileTypeCount']} (bytes {count_bytes.hex()})")
-
-    # Tile Types
-    for i, tt in enumerate(data['tileTypes']):
-        write_string(f, tt['value'])
-
-    # Layer Count
-    pos = f.tell()
-    lc_bytes = struct.pack('<i', data['layerCount'])
-    f.write(lc_bytes)
-    logger.log(f"0x{pos:X}: Wrote int32 (layerCount) = {data['layerCount']}")
-
-    for layer_idx, layer in enumerate(data['layers']):
-        logger.log(f"--- START LAYER {layer_idx + 1} ---")
-        
-        # Wall Count
-        pos = f.tell()
-        wc_bytes = struct.pack('<i', layer['wall_count'])
-        f.write(wc_bytes)
-        logger.log(f"0x{pos:X}: Wrote wallCount = {layer['wall_count']}")
-
-        for i, wall in enumerate(layer['walls']):
-            w_pos = f.tell()
-            w_bytes = struct.pack('<dddd', wall['pos_x'], wall['pos_y'], wall['width'], wall['length'])
-            f.write(w_bytes)
-            logger.log(f"  Wall {i} at 0x{w_pos:X}: pos=({wall['pos_x']}, {wall['pos_y']})")
+        for layer_idx, layer in enumerate(data.get('layers', [])):
+            logger.log(f"--- START LAYER {layer_idx + 1} ---")
             
-            write_string(f, wall['wall_type_name'])
-            
-            flag_pos = f.tell()
-            f.write(bytes([wall['has_shapes_flag']]))
-            logger.log(f"    0x{flag_pos:X}: Wrote has_shapes_flag = {wall['has_shapes_flag']}")
-            
-            if wall['has_shapes_flag'] == 0:
+            # A. Walls
+            walls = layer.get('walls', [])
+            write_packed('<i', len(walls), f"Layer {layer_idx+1} wallCount")
+            for i, wall in enumerate(walls):
                 pos = f.tell()
-                sc_bytes = struct.pack('<i', len(wall['shapes']))
-                f.write(sc_bytes)
-                logger.log(f"    0x{pos:X}: Wrote shape_count = {len(wall['shapes'])}")
-                for shape in wall['shapes']:
-                    write_string(f, shape['shape_type_name'])
-                    if shape['shape_type_name'] == "Circle":
-                        d = shape['data']
-                        f.write(struct.pack('<ddd', d['center_x'], d['center_y'], d['radius']))
-                    else:
-                        d = shape['data']
-                        f.write(struct.pack('<i', len(d['vertices'])))
-                        for v in d['vertices']:
-                            f.write(struct.pack('<dd', v[0], v[1]))
-            
-            f.write(struct.pack('<ii', wall['reserved'], wall['wall_id']))
+                f.write(struct.pack('<dddd', 
+                    wall.get('pos_x', 0.0), wall.get('pos_y', 0.0), 
+                    wall.get('width', 0.0), wall.get('length', 0.0)
+                ))
+                logger.log(f"0x{pos:X}: Wrote 32 bytes (Wall[{i}] doubles)")
+                
+                write_str(wall.get('wall_type_name', ''), f"Wall[{i}] type")
+                
+                flag = wall.get('has_shapes_flag', 1)
+                pos = f.tell()
+                f.write(struct.pack('<B', flag))
+                logger.log(f"0x{pos:X}: Wrote 1 byte (Wall[{i}] has_shapes_flag) -> {flag}")
+                
+                if flag == 0:
+                    shapes = wall.get('shapes', [])
+                    write_packed('<i', len(shapes), f"Wall[{i}] shapeCount")
+                    for j, shape in enumerate(shapes):
+                        write_str(shape.get('shape_type_name', ''), f"Wall[{i}] Shape[{j}] type")
+                        shape_data = shape.get('data', {})
+                        if shape.get('shape_type_name') == "Circle":
+                            pos = f.tell()
+                            f.write(struct.pack('<ddd', 
+                                shape_data.get('center_x', 0.0), 
+                                shape_data.get('center_y', 0.0), 
+                                shape_data.get('radius', 0.0)
+                            ))
+                            logger.log(f"0x{pos:X}: Wrote 24 bytes (Wall[{i}] Shape[{j}] Circle data)")
+                        else:
+                            vertices = shape_data.get('vertices', [])
+                            write_packed('<i', len(vertices), f"Wall[{i}] Shape[{j}] vCount")
+                            pos = f.tell()
+                            for vx, vy in vertices:
+                                f.write(struct.pack('<dd', vx, vy))
+                            logger.log(f"0x{pos:X}: Wrote {len(vertices)*16} bytes (Wall[{i}] Shape[{j}] vertices)")
+                
+                write_packed('<i', wall.get('reserved', 0), f"Wall[{i}] reserved")
+                write_packed('<i', wall.get('wall_id', 0), f"Wall[{i}] wall_id")
 
-        # Path Count
-        pos = f.tell()
-        pc_bytes = struct.pack('<i', layer['path_count'])
-        f.write(pc_bytes)
-        logger.log(f"0x{pos:X}: Wrote pathCount = {layer['path_count']}")
+            # B. Paths
+            paths = layer.get('paths', [])
+            write_packed('<i', len(paths), f"Layer {layer_idx+1} pathCount")
+            for i, path in enumerate(paths):
+                write_str(path.get('path_name', ''), f"Path[{i}] name")
+                pos = f.tell()
+                p = path.get('position', [0.0, 0.0])
+                f.write(struct.pack('<ddddB', p[0], p[1], path.get('extent_x_guess', 0.0), path.get('extent_y_guess', 0.0), path.get('path_flag', 0)))
+                logger.log(f"0x{pos:X}: Wrote 33 bytes (Path[{i}] doubles + flag)")
+                
+                if path.get('path_flag', 0) == 1:
+                    points = path.get('spline_points', [])
+                    write_packed('<i', len(points), f"Path[{i}] pointCount")
+                    pos = f.tell()
+                    for pt in points:
+                        p0, p1, p2 = pt.get('p0', [0,0]), pt.get('p1', [0,0]), pt.get('p2', [0,0])
+                        f.write(struct.pack('<dddddd', p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]))
+                    logger.log(f"0x{pos:X}: Wrote {len(points)*48} bytes (Path[{i}] spline points)")
+                
+                write_packed('<i', path.get('internal_id_guess', 0), f"Path[{i}] internal_id")
 
-        for i, path in enumerate(layer['paths']):
-            p_pos = f.tell()
-            write_string(f, path['path_name'])
-            f.write(struct.pack('<ddddB', path['position'][0], path['position'][1], path['extent_x_guess'], path['extent_y_guess'], path['path_flag']))
-            if path['path_flag'] == 1:
-                f.write(struct.pack('<i', path['point_count']))
-                for pt in path['spline_points']:
-                    f.write(struct.pack('<dddddd', pt['p0'][0], pt['p0'][1], pt['p1'][0], pt['p1'][1], pt['p2'][0], pt['p2'][1]))
-            f.write(struct.pack('<i', path.get('internal_id_guess', 0)))
+            # C. Entities
+            entities = layer.get('entities', [])
+            write_packed('<i', len(entities), f"Layer {layer_idx+1} entCount")
+            last_x, last_y, last_prio = 0, 0, 0
+            
+            for i, ent in enumerate(entities):
+                write_str(ent.get('type', ''), f"Entity[{i}] type")
+                
+                pos = ent.get('position', [0.0, 0.0])
+                curr_x_raw = int(round(pos[0] * 100))
+                curr_y_raw = int(round(pos[1] * 100))
+                dx, dy = curr_x_raw - last_x, curr_y_raw - last_y
+                p = f.tell()
+                f.write(struct.pack('<ii', dx, dy))
+                logger.log(f"0x{p:X}: Wrote 8 bytes (Entity[{i}] deltaPos) -> ({dx}, {dy})")
+                last_x, last_y = curr_x_raw, curr_y_raw
+                
+                p = f.tell()
+                f.write(struct.pack('<ii', ent.get('field_158', 0), ent.get('field_15c', 0)))
+                logger.log(f"0x{p:X}: Wrote 8 bytes (Entity[{i}] fields)")
+                
+                vec = ent.get('vec', {}).get('raw', [0, 0])
+                p = f.tell()
+                f.write(struct.pack('<ii', vec[0], vec[1]))
+                logger.log(f"0x{p:X}: Wrote 8 bytes (Entity[{i}] vec)")
+                
+                p = f.tell()
+                f.write(struct.pack('<ii', ent.get('field_250', {}).get('raw', 0), ent.get('rotation', {}).get('raw', 0)))
+                logger.log(f"0x{p:X}: Wrote 8 bytes (Entity[{i}] rot/field)")
+                
+                hb = ent.get('has_box', 0)
+                p = f.tell()
+                f.write(struct.pack('<B', hb))
+                logger.log(f"0x{p:X}: Wrote 1 byte (Entity[{i}] has_box) -> {hb}")
+                if hb != 0:
+                    box = ent.get('box', {})
+                    p = f.tell()
+                    f.write(struct.pack('<i', box.get('enabled', 0)))
+                    f.write(struct.pack('<iiii', *box.get('bounds', [0,0,0,0])))
+                    logger.log(f"0x{p:X}: Wrote 20 bytes (Entity[{i}] box data)")
+                
+                p = f.tell()
+                f.write(struct.pack('BBBB', *ent.get('color', {}).get('rgba', [255, 255, 255, 255])))
+                logger.log(f"0x{p:X}: Wrote 4 bytes (Entity[{i}] color)")
+                
+                write_packed('<d', ent.get('mass', 1.0), f"Entity[{i}] mass")
+                
+                curr_prio = ent.get('priority', 0)
+                write_packed('<i', curr_prio - last_prio, f"Entity[{i}] prio_delta")
+                last_prio = curr_prio
+                
+                hm = ent.get('has_move_direction', 0)
+                write_packed('<i', hm, f"Entity[{i}] has_move")
+                if hm == 1:
+                    mv = ent.get('move_direction', {})
+                    p = f.tell()
+                    f.write(struct.pack('<ddidddddd', 
+                        mv.get('v0', 0.0), mv.get('v1', 0.0), mv.get('flag0', 0),
+                        mv.get('v2', 0.0), mv.get('v3', 0.0), mv.get('v4', 0.0),
+                        mv.get('v5', 0.0), mv.get('v6', 0.0), mv.get('v7', 0.0)
+                    ))
+                    logger.log(f"0x{p:X}: Wrote 68 bytes (Entity[{i}] move_data)")
+                
+                hp = ent.get('has_path_follow', 0)
+                write_packed('<i', hp, f"Entity[{i}] has_path")
+                if hp == 1:
+                    pf = ent.get('path_follow', {})
+                    p = f.tell()
+                    f.write(struct.pack('<ddidd', pf.get('v0', 0.0), pf.get('v1', 0.0), pf.get('flag0', 0), pf.get('v2', 0.0), pf.get('v3', 0.0)))
+                    logger.log(f"0x{p:X}: Wrote 36 bytes (Entity[{i}] path_v0-3)")
+                    write_str(pf.get('path_name', ''), f"Entity[{i}] path_name")
+                    p = f.tell()
+                    f.write(struct.pack('<iid', pf.get('flag1', 0), pf.get('mode', 0), pf.get('v4', 0.0)))
+                    logger.log(f"0x{p:X}: Wrote 16 bytes (Entity[{i}] path_tail)")
 
-        # Entity Count
-        pos = f.tell()
-        ec_bytes = struct.pack('<i', layer['entity_count'])
-        f.write(ec_bytes)
-        logger.log(f"0x{pos:X}: Wrote entityCount = {layer['entity_count']}")
+                he = ent.get('has_emitter', 0)
+                write_packed('<i', he, f"Entity[{i}] has_emitter")
+                if he == 1:
+                    em = ent.get('emitter', {})
+                    p = f.tell()
+                    f.write(struct.pack('<ddddddddddd', *[em.get(f'v{i}', 0.0) for i in range(11)]))
+                    logger.log(f"0x{p:X}: Wrote 88 bytes (Entity[{i}] emitter doubles)")
+                    if layer_idx >= 3:
+                        write_packed('<i', em.get('reserved', 0), f"Entity[{i}] emitter_reserved")
+                        write_packed('<i', em.get('end_marker', 0), f"Entity[{i}] emitter_end")
 
-        lastX, lastY, lastPrio = 0.0, 0.0, 0
-        for i, ent in enumerate(layer['entities']):
-            e_pos = f.tell()
-            write_string(f, ent['type'])
+            # D. Decorations
+            decorations = layer.get('decorations', [])
+            write_packed('<i', len(decorations), f"Layer {layer_idx+1} decoCount")
+            last_x, last_y, last_prio = 0, 0, 0
             
-            currX_int = int(round(ent['position'][0] * 100))
-            currY_int = int(round(ent['position'][1] * 100))
-            dx = currX_int - int(round(lastX))
-            dy = currY_int - int(round(lastY))
-            lastX = float(currX_int)
-            lastY = float(currY_int)
-            
-            f.write(struct.pack('<ii', dx, dy))
-            f.write(struct.pack('<ii', ent['field_158'], ent['field_15c']))
-            f.write(struct.pack('<ii', ent['vec']['raw'][0], ent['vec']['raw'][1]))
-            f.write(struct.pack('<ii', ent['field_250']['raw'], ent['rotation']['raw']))
-            
-            hb = ent['has_box']
-            f.write(bytes([hb]))
-            if hb != 0:
-                box = ent['box']
-                f.write(struct.pack('<i', box['enabled']))
-                f.write(struct.pack('<iiii', *box['bounds']))
-            
-            f.write(bytes(ent['color']['rgba']))
-            f.write(struct.pack('<d', ent['mass']))
-            
-            p_delta = ent['priority'] - lastPrio
-            f.write(struct.pack('<i', p_delta))
-            lastPrio = ent['priority']
-            
-            # move_direction
-            hm = ent['has_move_direction']
-            f.write(struct.pack('<i', hm))
-            if hm == 1:
-                md = ent['move_direction']
-                f.write(struct.pack('<ddi dddddd', md['v0'], md['v1'], md['flag0'], md['v2'], md['v3'], md['v4'], md['v5'], md['v6'], md['v7']))
-            
-            # path_follow
-            hp = ent['has_path_follow']
-            f.write(struct.pack('<i', hp))
-            if hp == 1:
-                pf = ent['path_follow']
-                f.write(struct.pack('<ddi dd', pf['v0'], pf['v1'], pf['flag0'], pf['v2'], pf['v3']))
-                write_string(f, pf['path_name'])
-                f.write(struct.pack('<ii d', pf['flag1'], pf['mode'], pf['v4']))
-            
-            # emitter
-            he = ent['has_emitter']
-            f.write(struct.pack('<i', he))
-            if he == 1:
-                em = ent['emitter']
-                f.write(struct.pack('<ddddddddddd', em['v0'], em['v1'], em['v2'], em['v3'], em['v4'], em['v5'], em['v6'], em['v7'], em['v8'], em['v9'], em['v10']))
-                if layer_idx >= 3:
-                    f.write(struct.pack('<ii', em.get('reserved', 0), em.get('end_marker', 0)))
-            
-            logger.log(f"  0x{e_pos:X}: Wrote Entity {i} '{ent['type']}' dx={dx}, dy={dy}")
+            for i, deco in enumerate(decorations):
+                dt = deco.get('type', 0)
+                p = f.tell()
+                f.write(struct.pack('<B', dt))
+                logger.log(f"0x{p:X}: Wrote 1 byte (Deco[{i}] type) -> {dt}")
+                if dt == 0x02:
+                    write_str(deco.get('string', ''), f"Deco[{i}] string")
+                elif dt == 0x01:
+                    write_packed('<i', deco.get('cell', 0), f"Deco[{i}] cell")
+                
+                pos = deco.get('position', [0.0, 0.0])
+                curr_x_raw = int(round(pos[0] * 100))
+                curr_y_raw = int(round(pos[1] * 100))
+                p = f.tell()
+                f.write(struct.pack('<ii', curr_x_raw - last_x, curr_y_raw - last_y))
+                logger.log(f"0x{p:X}: Wrote 8 bytes (Deco[{i}] deltaPos) -> ({curr_x_raw-last_x}, {curr_y_raw-last_y})")
+                last_x, last_y = curr_x_raw, curr_y_raw
+                
+                write_packed('<i', deco.get('size', {}).get('raw', 0), f"Deco[{i}] size")
+                ef = deco.get('extra_flag', 0)
+                p = f.tell()
+                f.write(struct.pack('<B', ef))
+                logger.log(f"0x{p:X}: Wrote 1 byte (Deco[{i}] extra_flag) -> {ef}")
+                
+                if ef != 0:
+                    p = f.tell()
+                    f.write(struct.pack('<BB', *deco.get('extra_bools', [0, 0])))
+                    f.write(struct.pack('<iiii', *deco.get('extra_ints', [0,0,0,0])))
+                    f.write(struct.pack('<i', deco.get('size_override', {}).get('raw', 0)))
+                    f.write(struct.pack('<h', deco.get('extra_unknown', 0)))
+                    logger.log(f"0x{p:X}: Wrote 24 bytes (Deco[{i}] extra data)")
+                
+                p = f.tell()
+                f.write(struct.pack('BBBB', *deco.get('color_rgba', [255, 255, 255, 255])))
+                logger.log(f"0x{p:X}: Wrote 4 bytes (Deco[{i}] color)")
+                
+                p = f.tell()
+                dims = deco.get('dimensions', {}).get('raw', [0, 0])
+                f.write(struct.pack('<ii', dims[0], dims[1]))
+                logger.log(f"0x{p:X}: Wrote 8 bytes (Deco[{i}] dims)")
+                
+                cp = deco.get('priority', {}).get('total', 0)
+                write_packed('<i', cp - last_prio, f"Deco[{i}] prio_delta")
+                last_prio = cp
 
-        # Decoration Count
-        pos = f.tell()
-        dc_bytes = struct.pack('<i', layer['decoration_count'])
-        f.write(dc_bytes)
-        logger.log(f"0x{pos:X}: Wrote decorationCount = {layer['decoration_count']}")
-
-        lastX, lastY, lastPrio = 0.0, 0.0, 0
-        for i, deco in enumerate(layer['decorations']):
-            d_pos = f.tell()
-            dt = deco['type']
-            f.write(bytes([dt]))
-            if dt == 2:
-                write_string(f, deco['string'])
-            elif dt == 1:
-                f.write(struct.pack('<i', deco['cell']))
-            
-            currX_int = int(round(deco['position'][0] * 100))
-            currY_int = int(round(deco['position'][1] * 100))
-            dx = currX_int - int(round(lastX))
-            dy = currY_int - int(round(lastY))
-            lastX = float(currX_int)
-            lastY = float(currY_int)
-            
-            f.write(struct.pack('<ii', dx, dy))
-            f.write(struct.pack('<i', deco['size']['raw']))
-            
-            ef = deco['extra_flag']
-            f.write(bytes([ef]))
-            if ef != 0:
-                f.write(bytes(deco['extra_bools']))
-                f.write(struct.pack('<iiii', *deco['extra_ints']))
-                f.write(struct.pack('<i', deco['size_override']['raw']))
-                f.write(struct.pack('<h', deco['extra_unknown']))
-            
-            f.write(bytes(deco['color_rgba']))
-            f.write(struct.pack('<ii', deco['dimensions']['raw'][0], deco['dimensions']['raw'][1]))
-            
-            p_delta = deco['priority']['total'] - lastPrio
-            f.write(struct.pack('<i', p_delta))
-            lastPrio = deco['priority']['total']
-            
-            logger.log(f"  0x{d_pos:X}: Wrote Deco {i} type={deco['type']} dx={dx}, dy={dy} p_delta={p_delta}")
-
-duration = time.time() - start_time
-logger.log(f"Finished rebuilding binary: {output_bin}")
-logger.log(f"Total time: {duration:.4f} seconds ({duration * 1000:.2f} ms)")
-logger.close()
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python write_level_verbose.py <level_data.json> [output.bin]")
+        sys.exit(1)
+        
+    input_json = Path(sys.argv[1])
+    level_name = input_json.name.replace("_data.json", "")
+    output_bin = sys.argv[2] if len(sys.argv) > 2 else Path(f"{level_name}_rebuilt_verbose.bin")
+    log_file = f"{level_name}_write_verbose.log"
+    
+    logger = Logger(log_file)
+    logger.log(f"Starting verbose write of {input_json.name}")
+    
+    try:
+        with open(input_json, 'r') as f:
+            data = json.load(f)
+        write_level(data, output_bin, logger)
+        print(f"Successfully rebuilt {input_json.name} to {output_bin}")
+        print(f"Verbose log written to {log_file}")
+    finally:
+        logger.close()
