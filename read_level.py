@@ -5,7 +5,7 @@ import re
 import json
 from pathlib import Path
 
-DEBUG_ENABLED = False
+DEBUG_ENABLED = True
 
 def find_next_lowercase_string(f):
     """Searches for a 4-byte little-endian length followed by a lowercase/underscore string."""
@@ -500,15 +500,15 @@ with open(bin_file, 'rb') as f:
                         if len(vec_bytes) < 8:
                             break
                         vec_x_raw, vec_y_raw = struct.unpack('<ii', vec_bytes)
-                        ent['vec'] = {"raw": [vec_x_raw, vec_y_raw], "scaled": [round(vec_x_raw * 0.01, 4), round(vec_y_raw * 0.01, 4)]}
+                        ent['vec'] = {"raw": [vec_x_raw, vec_y_raw], "scaled": [vec_x_raw * 0.01, vec_y_raw * 0.01]}
 
                         # field_250_raw, field_90_raw (scaled 0.01)
                         field2_bytes = f.read(8)
                         if len(field2_bytes) < 8:
                             break
                         field_250_raw, rot_raw = struct.unpack('<ii', field2_bytes)
-                        ent['field_250'] = {"raw": field_250_raw, "scaled": round(field_250_raw * 0.01, 4)}
-                        ent['rotation'] = {"raw": rot_raw, "scaled": round(rot_raw * 0.01, 4)}
+                        ent['field_250'] = {"raw": field_250_raw, "scaled": field_250_raw * 0.01}
+                        ent['rotation'] = {"raw": rot_raw, "scaled": rot_raw * 0.01}
 
                         # has_box
                         has_box_b = f.read(1)
@@ -753,7 +753,7 @@ with open(bin_file, 'rb') as f:
                     if len(size_bytes) < 4:
                         break
                     size_raw = struct.unpack('<i', size_bytes)[0]
-                    deco['size'] = {"raw": size_raw, "scaled": round(size_raw * 0.01, 4)}
+                    deco['size'] = {"raw": size_raw, "scaled": size_raw * 0.01}
 
                     # Extra flag
                     extra_flag_b = f.read(1)
@@ -785,7 +785,7 @@ with open(bin_file, 'rb') as f:
                         if len(size_override_bytes) < 4:
                             break
                         size_override_raw = struct.unpack('<i', size_override_bytes)[0]
-                        deco['size_override'] = {"raw": size_override_raw, "scaled": round(size_override_raw * 0.01, 4)}
+                        deco['size_override'] = {"raw": size_override_raw, "scaled": size_override_raw * 0.01}
 
                         extra_unknown_bytes = f.read(2)
                         if len(extra_unknown_bytes) < 2:
@@ -803,8 +803,8 @@ with open(bin_file, 'rb') as f:
                         width_raw, height_raw = struct.unpack('<ii', wh_bytes)
                         deco['dimensions'] = {
                             "raw": [width_raw, height_raw],
-                            "scaled": [round(width_raw * 0.01, 4), round(height_raw * 0.01, 4)],
-                            "radius": round(0.5 * math.hypot(width_raw * 0.01, height_raw * 0.01), 4)
+                            "scaled": [width_raw * 0.01, height_raw * 0.01],
+                            "radius": 0.5 * math.hypot(width_raw * 0.01, height_raw * 0.01)
                         }
 
                         priority_bytes = f.read(4)
@@ -835,8 +835,8 @@ with open(bin_file, 'rb') as f:
                     width_raw, height_raw = struct.unpack('<ii', wh_bytes)
                     deco['dimensions'] = {
                         "raw": [width_raw, height_raw],
-                        "scaled": [round(width_raw * 0.01, 4), round(height_raw * 0.01, 4)],
-                        "radius": round(0.5 * math.hypot(width_raw * 0.01, height_raw * 0.01), 4)
+                        "scaled": [width_raw * 0.01, height_raw * 0.01],
+                        "radius": 0.5 * math.hypot(width_raw * 0.01, height_raw * 0.01)
                     }
 
                     # Priority delta (int32)
@@ -857,10 +857,7 @@ with open(bin_file, 'rb') as f:
                 break
 # Prepare data for JSON output
 def clean_data(obj):
-    """Recursively removes None values and rounds floats for cleaner JSON."""
-    if isinstance(obj, float):
-        val = round(obj, 4)
-        return int(val) if val == int(val) else val
+    """Recursively removes None values."""
     if isinstance(obj, dict):
         new_dict = {}
         for k, v in obj.items():
