@@ -1,6 +1,10 @@
 # Tasty-Planet-2-level-parser
 A python script to parse level.bin files from Tasty Planet Back for Seconds
 
+## About
+
+This script currently parses level bin files into JSON format (one-way conversion). It does not yet convert JSON back to bin files. This is the first step toward being able to make custom levels for Tasty Planet Back for Seconds.
+
 ## Usage
 
 To run the script, use the following command:
