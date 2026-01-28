@@ -1,11 +1,53 @@
-# Tasty-Planet-2-level-parser
-A python script to parse level.bin files from Tasty Planet Back for Seconds
+# Tasty-Planet-2-level-editor
+A level editor and parser for Tasty Planet Back for Seconds
 
 ## About
 
-This project provides scripts to parse and write level.bin files for Tasty Planet Back for Seconds. With both `read_level.py` and `write_level.py`, custom levels in Tasty Planet Back for Seconds are now fully possible! You can extract existing levels to JSON, modify them, and write them back to binary format, or create entirely new custom levels from scratch.
+This project provides both a graphical level editor (`level_editor.py`) and command-line scripts to parse and write level.bin files for Tasty Planet Back for Seconds. With these tools, custom levels in Tasty Planet Back for Seconds are now fully possible! You can extract existing levels to JSON, modify them using the GUI editor or by hand, and write them back to binary format, or create entirely new custom levels from scratch.
 
-## Usage
+## Level Editor GUI (level_editor.py)
+
+The `level_editor.py` script provides a graphical user interface for editing Tasty Planet Back for Seconds levels. This is the easiest way to create and modify custom levels.
+
+### Getting Started
+
+#### Option 1: Use the Pre-built EXE (Windows)
+
+For Windows users, we provide a standalone executable that doesn't require Python installation:
+
+1. Go to the [Releases page](https://github.com/RemagOfficial/Tasty-Planet-2-level-editor/releases) and download `TP2_Level_Editor.exe`
+2. Run the executable directly - no installation required!
+
+**Note:** The EXE is a bundled version of `level_editor.py`, `read_level.py`, and `write_level.py`. If you prefer not to use a pre-built executable, you can use the Python scripts directly (see Option 2).
+
+#### Option 2: Run from Python Script
+
+If you have Python installed, you can run the level editor directly:
+
+```bash
+python level_editor.py
+```
+
+### Features
+
+The Level Editor GUI provides:
+- Visual editing of level entities, decorations, walls, and paths
+- Point-and-click interface for easy level modification
+- Real-time preview of level layout
+- Undo/Redo support
+- Load and save level files directly
+- Entity scaling and positioning tools
+- Layer visibility controls
+
+### Usage Tips
+
+1. **Setting up**: On first launch or via File → Select Assets Folder, choose the game's assets folder containing the levels
+2. **Loading a Level**: Use the Level Selector dropdown at the top of the window to choose and load a level
+3. **Editing**: Click and drag entities, walls, and other objects to reposition them
+4. **Saving**: Use File → Save (or Ctrl+S) to write your changes back to a .bin file
+5. **Testing**: Your modified level will be saved directly in the game's levels folder - just launch the game to test it!
+
+## Command-Line Usage
 
 ### Reading Levels (read_level.py)
 
