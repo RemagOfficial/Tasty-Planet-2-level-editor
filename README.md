@@ -15,9 +15,8 @@ The `level_editor.py` script provides a graphical user interface for editing Tas
 
 For Windows users, we provide a standalone executable that doesn't require Python installation:
 
-1. Download the latest release from the [Releases page](https://github.com/RemagOfficial/Tasty-Planet-2-level-editor/releases)
-2. Download `TP2_Level_Editor.exe`
-3. Run the executable directly - no installation required!
+1. Go to the [Releases page](https://github.com/RemagOfficial/Tasty-Planet-2-level-editor/releases) and download `TP2_Level_Editor.exe`
+2. Run the executable directly - no installation required!
 
 **Note:** The EXE is a bundled version of `level_editor.py`, `read_level.py`, and `write_level.py`. If you prefer not to use a pre-built executable, you can use the Python scripts directly (see Option 2).
 
@@ -42,10 +41,11 @@ The Level Editor GUI provides:
 
 ### Usage Tips
 
-1. **Opening a Level**: Use File → Open to load an existing level.bin file
-2. **Editing**: Click and drag entities, walls, and other objects to reposition them
-3. **Saving**: Use File → Save to write your changes back to a .bin file
-4. **Testing**: Replace an existing level file in your game's levels folder to test your custom level in-game
+1. **Setting up**: On first launch or via File → Select Assets Folder, choose the game's assets folder containing the levels
+2. **Loading a Level**: Use the Level Selector dropdown at the top of the window to choose and load a level
+3. **Editing**: Click and drag entities, walls, and other objects to reposition them
+4. **Saving**: Use File → Save (or Ctrl+S) to write your changes back to a .bin file
+5. **Testing**: Your modified level will be saved directly in the game's levels folder - just launch the game to test it!
 
 ## Command-Line Usage
 
