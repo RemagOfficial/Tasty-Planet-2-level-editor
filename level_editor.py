@@ -5,6 +5,8 @@ import os
 import sys
 import shutil
 import copy
+import zipfile
+import tempfile
 import xml.etree.ElementTree as ET
 from read_level import read_level
 from write_level import write_level
@@ -41,8 +43,12 @@ class LevelEditor:
         self.max_undo = 50
         
         # Drag and Edit state
-        self.selected_item = None
+        self.selection = [] # List of data object references
         self.is_dragging = False
+        self.selection_rect = None
+        self.selection_start = None
+        self.clipboard = None # Stores list of {data, type, offset} or single item
+        self.context_menu = None
         
         # Visibility State: {layer_idx: {type: bool}}
         self.visibility = {} 
@@ -289,7 +295,8 @@ class LevelEditor:
             else:
                 self.bounds = None
 
-            # Reset visibility for new level
+            # Reset visibility and selection for new level
+            self.selection = []
             self.init_visibility()
             self.render_level()
             self.status_var.set(f"Loaded: {os.path.basename(bin_path)}")
@@ -388,6 +395,7 @@ class LevelEditor:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Save", command=self.save_file, accelerator="Ctrl+S")
+        file_menu.add_command(label="Save to APK (beta)...", command=self.save_to_apk)
         file_menu.add_separator()
         file_menu.add_command(label="Restore to Original", command=self.restore_current_level)
         file_menu.add_separator()
@@ -400,10 +408,15 @@ class LevelEditor:
         edit_menu.add_command(label="Undo", command=self.undo, accelerator="Ctrl+Z")
         edit_menu.add_command(label="Redo", command=self.redo, accelerator="Ctrl+Y")
         edit_menu.add_separator()
+        edit_menu.add_command(label="Copy", command=self.copy_selected, accelerator="Ctrl+C")
+        edit_menu.add_command(label="Paste", command=self.paste_item, accelerator="Ctrl+V")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Add Entity", command=self.add_entity, accelerator="Ctrl+E")
         edit_menu.add_command(label="Add Wall", command=self.add_wall, accelerator="Ctrl+W")
+        edit_menu.add_command(label="Add Decoration", command=self.add_decoration, accelerator="Ctrl+D")
         edit_menu.add_command(label="Rediscover Assets", command=self.discover_assets)
         edit_menu.add_separator()
+        edit_menu.add_command(label="Bulk Replace Entity Type", command=self.show_bulk_replace_entities)
         edit_menu.add_command(label="Bulk Replace Tile Type", command=self.show_bulk_replace_tiles)
         edit_menu.add_separator()
         edit_menu.add_command(label="Reset Camera/View", command=self.reset_view)
@@ -444,7 +457,7 @@ class LevelEditor:
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         # Main Canvas
-        self.canvas = tk.Canvas(self.root, bg="white")
+        self.canvas = tk.Canvas(self.root, bg="white", highlightthickness=0, takefocus=True)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Right sidebar for layers
@@ -492,10 +505,16 @@ class LevelEditor:
         self.root.bind("<Control-Y>", self.redo)
         self.root.bind("<Control-s>", lambda e: self.save_file())
         self.root.bind("<Control-S>", lambda e: self.save_file())
+        self.root.bind("<Control-c>", lambda e: self.copy_selected())
+        self.root.bind("<Control-C>", lambda e: self.copy_selected())
+        self.root.bind("<Control-v>", lambda e: self.paste_item())
+        self.root.bind("<Control-V>", lambda e: self.paste_item())
         self.root.bind("<Control-e>", lambda e: self.add_entity())
         self.root.bind("<Control-E>", lambda e: self.add_entity())
         self.root.bind("<Control-w>", lambda e: self.add_wall())
         self.root.bind("<Control-W>", lambda e: self.add_wall())
+        self.root.bind("<Control-d>", lambda e: self.add_decoration())
+        self.root.bind("<Control-D>", lambda e: self.add_decoration())
         self.canvas.bind("<Delete>", self.on_delete_key)
 
     def on_delete_key(self, event):
@@ -731,11 +750,12 @@ class LevelEditor:
         # Re-parse XML data to sync goostarts/bounds
         self.parse_xml_data()
         
-        # Re-render
+        # Re-render and clear selection (old references are invalid)
+        self.selection = []
         self.render_level()
         # Note: We don't reset visibility here to keep context
 
-    def add_entity(self):
+    def add_entity(self, canvas_x=None, canvas_y=None):
         if not self.level_data:
             messagebox.showwarning("Warning", "No level loaded.")
             return
@@ -747,7 +767,7 @@ class LevelEditor:
         try:
             self.push_state()
 
-            # Calculate position at center of current view
+            # Calculate position
             width = self.canvas.winfo_width()
             height = self.canvas.winfo_height()
             
@@ -758,11 +778,19 @@ class LevelEditor:
             center_x = width / 2 + self.offset_x
             center_y = height / 2 + self.offset_y
 
-            # Correct math to place at center:
-            # canvas_x = center_x + world_x * scale * ent_scale_factor
-            # world_x = (canvas_x - center_x) / (scale * ent_scale_factor)
-            world_x = (width / 2 - center_x) / (scale * ent_scale_factor)
-            world_y = (height / 2 - center_y) / (scale * ent_scale_factor)
+            if canvas_x is None or canvas_y is None:
+                # Use current mouse position if not passed (for Ctrl+E)
+                pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+                pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+                
+                # If mouse is outside canvas, use center
+                if not (0 <= pointer_x <= width and 0 <= pointer_y <= height):
+                    pointer_x, pointer_y = width/2, height/2
+                
+                canvas_x, canvas_y = pointer_x, pointer_y
+
+            world_x = (canvas_x - center_x) / (scale * ent_scale_factor)
+            world_y = (canvas_y - center_y) / (scale * ent_scale_factor)
 
             # Calculate average priority of existing entities
             avg_priority = 0
@@ -791,7 +819,7 @@ class LevelEditor:
                 'has_emitter': 0
             }
 
-            # Find the layer with the most entities
+            # Auto-find the layer with the most entities
             layers = self.level_data.get('layers', [])
             target_layer_idx = 0
             max_ents = -1
@@ -803,11 +831,12 @@ class LevelEditor:
                     target_layer_idx = idx
 
             # Add to the chosen layer
-            if layers:
+            if 0 <= target_layer_idx < len(layers):
                 layers[target_layer_idx].setdefault('entities', []).append(new_ent)
                 # Ensure the target layer and Entities are visible
                 if target_layer_idx in self.visibility:
                     self.visibility[target_layer_idx]['entities'].set(True)
+                self.selection = [new_ent]
             else:
                 messagebox.showerror("Error", "Level has no layers.")
                 return
@@ -831,7 +860,7 @@ class LevelEditor:
             messagebox.showerror("Error", f"Failed to add entity: {e}")
             print(f"Add entity error: {e}")
 
-    def add_wall(self):
+    def add_wall(self, canvas_x=None, canvas_y=None):
         if not self.level_data:
             messagebox.showwarning("Warning", "No level loaded.")
             return
@@ -843,7 +872,7 @@ class LevelEditor:
         try:
             self.push_state()
 
-            # Calculate position at center of current view
+            # Calculate position
             width = self.canvas.winfo_width()
             height = self.canvas.winfo_height()
             
@@ -852,8 +881,19 @@ class LevelEditor:
             center_x = width / 2 + self.offset_x
             center_y = height / 2 + self.offset_y
 
-            world_x = (width / 2 - center_x) / scale
-            world_y = (height / 2 - center_y) / scale
+            if canvas_x is None or canvas_y is None:
+                # Use current mouse position if not passed (for Ctrl+W)
+                pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+                pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+                
+                # If mouse is outside canvas, use center
+                if not (0 <= pointer_x <= width and 0 <= pointer_y <= height):
+                    pointer_x, pointer_y = width/2, height/2
+                
+                canvas_x, canvas_y = pointer_x, pointer_y
+
+            world_x = (canvas_x - center_x) / scale
+            world_y = (canvas_y - center_y) / scale
 
             # Find max wall_id
             max_id = 0
@@ -874,7 +914,7 @@ class LevelEditor:
                 'wall_id': max_id + 1
             }
 
-            # Find the layer with the most walls
+            # Auto-find the layer with the most walls
             layers = self.level_data.get('layers', [])
             target_layer_idx = 0
             max_walls = -1
@@ -886,7 +926,7 @@ class LevelEditor:
                     target_layer_idx = idx
 
             # Add to the chosen layer
-            if layers:
+            if 0 <= target_layer_idx < len(layers):
                 layers[target_layer_idx].setdefault('walls', []).append(new_wall)
                 # Ensure the target layer and Walls are visible
                 if target_layer_idx in self.visibility:
@@ -912,6 +952,84 @@ class LevelEditor:
             self.status_var.set(f"Added new wall 'everything' with ID {new_wall['wall_id']}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to add wall: {e}")
+
+    def add_decoration(self, canvas_x=None, canvas_y=None):
+        if not self.level_data:
+            messagebox.showwarning("Warning", "No level loaded.")
+            return
+
+        if self.preview_mode.get():
+            messagebox.showwarning("Preview Mode", "Adding decorations is disabled in Preview Mode.")
+            return
+
+        try:
+            self.push_state()
+
+            # Calculate position
+            width = self.canvas.winfo_width()
+            height = self.canvas.winfo_height()
+            scale = 5.0 * self.scale
+            center_x = width / 2 + self.offset_x
+            center_y = height / 2 + self.offset_y
+
+            if canvas_x is None or canvas_y is None:
+                # Use current mouse position if not passed (for Ctrl+D)
+                pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+                pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+                
+                # If mouse is outside canvas, use center
+                if not (0 <= pointer_x <= width and 0 <= pointer_y <= height):
+                    pointer_x, pointer_y = width/2, height/2
+                
+                canvas_x, canvas_y = pointer_x, pointer_y
+
+            world_x = (canvas_x - center_x) / scale
+            world_y = (canvas_y - center_y) / scale
+
+            # Default to first tile type or 0
+            cell_idx = 0
+            
+            new_deco = {
+                'cell': cell_idx,
+                'position': [world_x, world_y],
+                'field_24': 0,
+                'rgba': [255, 255, 255, 255]
+            }
+
+            # Auto-find the layer with the most decorations
+            layers = self.level_data.get('layers', [])
+            target_layer_idx = 0
+            max_decos = -1
+            
+            for idx, layer in enumerate(layers):
+                d_count = len(layer.get('decorations', []))
+                if d_count > max_decos:
+                    max_decos = d_count
+                    target_layer_idx = idx
+
+            if 0 <= target_layer_idx < len(layers):
+                layers[target_layer_idx].setdefault('decorations', []).append(new_deco)
+                if target_layer_idx in self.visibility:
+                    self.visibility[target_layer_idx]['decorations'].set(True)
+            else:
+                messagebox.showerror("Error", "Level has no layers.")
+                return
+
+            self.render_level()
+            
+            # Find and open dialog
+            new_item_id = None
+            for item_id, data_obj in self.item_data_map.items():
+                if data_obj is new_deco:
+                    new_item_id = item_id
+                    break
+            
+            if new_item_id:
+                self.open_edit_dialog(new_deco, new_item_id)
+            
+            self.status_var.set("New decoration added.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add decoration: {e}")
 
     def save_file(self):
         if not self.level_data:
@@ -986,6 +1104,192 @@ class LevelEditor:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save level: {e}")
 
+    def save_to_apk(self):
+        if not self.level_data:
+            messagebox.showwarning("Warning", "No level data to save.")
+            return
+
+        apk_path = filedialog.askopenfilename(
+            title="Select Target APK File",
+            filetypes=[("APK Files", "*.apk")]
+        )
+        if not apk_path:
+            return
+
+        # Prepare filenames
+        base_name = os.path.basename(self.current_file) if self.current_file else "level.bin"
+        xml_name = os.path.basename(self.xml_path) if self.xml_path else base_name.replace(".bin", ".xml")
+
+        try:
+            # Temporary files to store the bin and xml data
+            temp_dir = tempfile.mkdtemp()
+            temp_bin = os.path.join(temp_dir, base_name)
+            temp_xml = os.path.join(temp_dir, xml_name)
+            
+            # Save the level to temp files
+            write_level(self.level_data, temp_bin)
+            if self.xml_tree:
+                self.xml_tree.write(temp_xml, encoding='utf-8', xml_declaration=True)
+            
+            # Create a new temporary APK
+            fd, new_apk_path = tempfile.mkstemp(suffix=".apk")
+            os.close(fd)
+            
+            target_dir = "assets/assets/levels/"
+            files_to_replace = {
+                target_dir + base_name: temp_bin
+            }
+            if self.xml_tree:
+                files_to_replace[target_dir + xml_name] = temp_xml
+
+            found_target_dir = False
+            
+            with zipfile.ZipFile(apk_path, 'r') as zin:
+                # Check if directory exists
+                for name in zin.namelist():
+                    if name.startswith(target_dir):
+                        found_target_dir = True
+                        break
+                
+                if not found_target_dir:
+                    shutil.rmtree(temp_dir)
+                    os.remove(new_apk_path)
+                    messagebox.showerror("Error", f"Target directory '{target_dir}' not found in APK. Is this the correct Tasty Planet 2 APK?")
+                    return
+
+                with zipfile.ZipFile(new_apk_path, 'w') as zout:
+                    for item in zin.infolist():
+                        # Skip files we are replacing AND the old signature
+                        if item.filename not in files_to_replace and not item.filename.startswith("META-INF/"):
+                            zout.writestr(item, zin.read(item.filename))
+                    
+                    # Add our new files
+                    for arc_path, local_path in files_to_replace.items():
+                        zout.write(local_path, arc_path)
+            
+            # Backup original APK before replacing
+            backup_apk = apk_path + ".bak"
+            if not os.path.exists(backup_apk):
+                shutil.copy2(apk_path, backup_apk)
+
+            # Replace original APK with the modified one
+            shutil.move(new_apk_path, apk_path)
+            
+            # Clean up
+            shutil.rmtree(temp_dir)
+            
+            # Auto-Signing Opportunity
+            signed_msg = ""
+            # Ask if the user wants to sign, providing context about why they might say no
+            choice = messagebox.askyesnocancel("Sign APK", 
+                "APK updated! Would you like to automatically sign the APK now?\n\n"
+                "Yes: Sign with a debug key (Installable immediately).\n"
+                "No: Save without signing (You must sign it manually later).\n"
+                "Cancel: Abort the process.")
+            
+            if choice is True: # Yes
+                success, msg = self.sign_apk(apk_path)
+                if success:
+                    signed_msg = "\n\nAPK has been SIGNED with a debug key and should be installable."
+                else:
+                    signed_msg = f"\n\nAutomatic signing failed: {msg}\nYou will need to sign it manually."
+            elif choice is False: # No
+                signed_msg = "\n\nAPK saved WITHOUT signing. You must sign it before installing."
+            else: # Cancel
+                return
+
+            messagebox.showinfo("Success", f"APK Updated successfully!\nSaved to: {target_dir}{signed_msg}")
+            self.status_var.set(f"Published level to APK: {apk_path}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to modify APK: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def sign_apk(self, apk_path):
+        import subprocess
+        
+        # Paths for keystore
+        base_dir = os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False) else os.path.dirname(sys.executable)
+        keystore_path = os.path.join(base_dir, "debug.keystore")
+        alias = "debug"
+        password = "androiddebug"
+        
+        try:
+            # 1. Check if jarsigner and keytool exist
+            jarsigner = shutil.which("jarsigner")
+            if not jarsigner:
+                # Try common locations if not in PATH (some Windows users have it but not in path)
+                potential_paths = [
+                    r"C:\Program Files\AdoptOpenJDK\jdk-16.0.1.9-hotspot\bin\jarsigner.exe",
+                    r"C:\Program Files (x86)\Java\jdk1.8.0_291\bin\jarsigner.exe"
+                ]
+                for p in potential_paths:
+                    if os.path.exists(p):
+                        jarsigner = p
+                        break
+            
+            keytool = shutil.which("keytool")
+            if not keytool:
+                potential_paths = [
+                    r"C:\Program Files\AdoptOpenJDK\jdk-16.0.1.9-hotspot\bin\keytool.exe",
+                    r"C:\Program Files (x86)\Java\jdk1.8.0_291\bin\keytool.exe"
+                ]
+                for p in potential_paths:
+                    if os.path.exists(p):
+                        keytool = p
+                        break
+            
+            if not jarsigner:
+                return False, (
+                    "Could not find 'jarsigner.exe'.\n\n"
+                    "This tool is part of the Java Development Kit (JDK) and is required to make the APK installable.\n\n"
+                    "HOW TO FIX:\n"
+                    "1. Install the Java JDK (Recommended: Adoptium Temurin or Oracle JDK).\n"
+                    "2. Add the JDK 'bin' folder to your Windows System PATH environment variable.\n"
+                    "3. Or install it to the default 'C:\\Program Files\\Java' directory."
+                )
+
+            # 2. Check if keystore exists, if not, create it
+            if not os.path.exists(keystore_path):
+                if not keytool:
+                    return False, (
+                        "Could not find 'keytool.exe'.\n\n"
+                        "This tool is required to create a new signing key (debug.keystore).\n"
+                        "Please ensure the Java JDK is correctly installed and its 'bin' folder is in your PATH."
+                    )
+                
+                cmd = [
+                    keytool, "-genkey", "-v", 
+                    "-keystore", keystore_path, 
+                    "-storepass", password, 
+                    "-alias", alias, 
+                    "-keypass", password, 
+                    "-keyalg", "RSA", 
+                    "-keysize", "2048", 
+                    "-validity", "10000", 
+                    "-dname", "cn=TP2Editor"
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+
+            # 3. Sign the APK
+            # Note: SIGALG and DIGESTALG are important for older android compatibility
+            cmd = [
+                jarsigner, "-sigalg", "SHA1withRSA", 
+                "-digestalg", "SHA1", 
+                "-keystore", keystore_path, 
+                "-storepass", password, 
+                apk_path, alias
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return False, f"Jarsigner failed: {result.stderr}"
+                
+            return True, "Success"
+            
+        except Exception as e:
+            return False, str(e)
+
     def update_ui_for_mode(self):
         if self.preview_mode.get():
             self.root.title("TP2 Simple Level Editor (PREVIEW MODE - READ ONLY)")
@@ -1011,13 +1315,17 @@ CONTROL SCHEME:
 • Right-Click Drag: Pan the map.
 • Mouse Wheel: Zoom in/out.
 • Left-Click Drag: Move entities and walls.
-• Right-Click (on object): Open property editor and delete items.
+• Right-Click (on object): Open context menu to Copy, Edit, or Delete.
+• Right-Click (empty space): Paste copied item at cursor.
 • Delete: Quick-delete object under mouse cursor.
+• Ctrl + C / Ctrl + V: Copy and Paste object under mouse.
 
 HOTKEYS:
 • Ctrl + S: Save all changes (.bin & .xml).
 • Ctrl + Z: Undo last action.
 • Ctrl + Y: Redo action.
+• Ctrl + C: Copy object under mouse or selected object.
+• Ctrl + V: Paste copied object at mouse cursor.
 • Ctrl + E: Add new Entity at screen center.
 • Ctrl + W: Add new Wall at screen center.
 
@@ -1089,6 +1397,86 @@ TIPS:
             path_lb.insert(tk.END, pname)
             
         tk.Label(dialog, text=f"Total Paths: {len(path_names)}").pack(pady=(0, 10))
+
+    def show_bulk_replace_entities(self):
+        if not self.level_data:
+            messagebox.showinfo("Wait", "Please load a level first.")
+            return
+
+        if self.preview_mode.get():
+            messagebox.showwarning("Preview Mode", "Bulk replacing entities is disabled in Preview Mode.")
+            return
+
+        # Get list of entity types currently in the level
+        current_types = set()
+        for layer in self.level_data.get('layers', []):
+            for ent in layer.get('entities', []):
+                if ent.get('type'):
+                    current_types.add(ent['type'])
+        
+        sorted_current = sorted(list(current_types))
+        if not sorted_current:
+            messagebox.showinfo("Wait", "This level has no entities to replace.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Bulk Replace Entity Type")
+        dialog.geometry("400x250")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="Replace all instances of one entity type with another.", font=("tahoma", 9, "bold")).pack(pady=10)
+
+        frame = tk.Frame(dialog)
+        frame.pack(padx=20, pady=10, fill=tk.X)
+
+        tk.Label(frame, text="Find:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        old_type_var = tk.StringVar()
+        old_combo = ttk.Combobox(frame, textvariable=old_type_var, values=sorted_current, state="readonly")
+        old_combo.grid(row=0, column=1, sticky=tk.EW, padx=5)
+        if sorted_current: old_combo.current(0)
+
+        tk.Label(frame, text="Replace with:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        new_type_var = tk.StringVar()
+        # Use globally discovered entity_types as options
+        new_combo = ttk.Combobox(frame, textvariable=new_type_var, values=self.entity_types, state="readonly")
+        new_combo.grid(row=1, column=1, sticky=tk.EW, padx=5)
+        if self.entity_types:
+            if sorted_current[0] in self.entity_types:
+                new_combo.set(sorted_current[0])
+            else:
+                new_combo.current(0)
+
+        frame.grid_columnconfigure(1, weight=1)
+
+        def do_replace():
+            old_name = old_type_var.get()
+            new_name = new_type_var.get()
+
+            if not old_name or not new_name:
+                return
+                
+            if old_name == new_name:
+                messagebox.showinfo("No Change", "Source and destination types are the same.")
+                return
+
+            self.push_state() # Save for undo
+
+            count = 0
+            for layer in self.level_data.get('layers', []):
+                for ent in layer.get('entities', []):
+                    if ent.get('type') == old_name:
+                        ent['type'] = new_name
+                        count += 1
+            
+            self.render_level()
+            messagebox.showinfo("Success", f"Replaced {count} entities of type '{old_name}' with '{new_name}'.")
+            dialog.destroy()
+
+        btn_bar = tk.Frame(dialog)
+        btn_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        tk.Button(btn_bar, text="Replace All", command=do_replace, width=15, bg="#e1f5fe").pack(side=tk.RIGHT, padx=10)
+        tk.Button(btn_bar, text="Cancel", command=dialog.destroy, width=10).pack(side=tk.RIGHT)
 
     def show_bulk_replace_tiles(self):
         if not self.level_data:
@@ -1233,6 +1621,9 @@ TIPS:
 
         wall_count, ent_count, deco_count, path_count = 0, 0, 0, 0
         ent_scale_factor = self.ent_scale_var.get()
+        
+        # Pre-calculate selection IDs for performance
+        selected_ids = {id(obj) for obj in self.selection}
 
         for i, layer in enumerate(self.level_data.get('layers', [])):
             vis = self.visibility.get(i, {})
@@ -1245,8 +1636,11 @@ TIPS:
                     x = center_x + wall['pos_x'] * scale
                     y = center_y + wall['pos_y'] * scale
                     if canv_l < x < canv_r and canv_t < y < canv_b:
-                        id = create_rect(x-3, y-3, x+3, y+3, fill="blue", outline="blue", tags="wall")
-                        self.item_data_map[id] = wall
+                        is_sel = id(wall) in selected_ids
+                        color = "yellow" if is_sel else "blue"
+                        width = 2 if is_sel else 1
+                        id_wall = create_rect(x-3, y-3, x+3, y+3, fill=color, outline=color, width=width, tags="wall")
+                        self.item_data_map[id_wall] = wall
 
             # Render Entities (Red)
             entities = layer.get('entities', [])
@@ -1259,10 +1653,13 @@ TIPS:
                     
                     if canv_l < x < canv_r and canv_t < y < canv_b:
                         gx, gy = int(x/grid_size), int(y/grid_size)
-                        if (gx, gy) not in drawn_entities:
-                            id = create_rect(x-6, y-6, x+6, y+6, fill="red", outline="black", tags="entity")
-                            self.item_data_map[id] = ent
-                            drawn_entities.add((gx, gy))
+                        is_sel = id(ent) in selected_ids
+                        if (gx, gy) not in drawn_entities or is_sel:
+                            outline = "yellow" if is_sel else "black"
+                            width = 2 if is_sel else 1
+                            id_ent = create_rect(x-6, y-6, x+6, y+6, fill="red", outline=outline, width=width, tags="entity")
+                            self.item_data_map[id_ent] = ent
+                            if not is_sel: drawn_entities.add((gx, gy))
 
             # Render Decorations (Green)
             decorations = layer.get('decorations', [])
@@ -1275,10 +1672,13 @@ TIPS:
                     
                     if canv_l < x < canv_r and canv_t < y < canv_b:
                         gx, gy = int(x/grid_size), int(y/grid_size)
-                        if (gx, gy) not in drawn_decorations:
-                            id = create_rect(x-3, y-3, x+3, y+3, fill="green", outline="", tags="decoration")
-                            self.item_data_map[id] = deco
-                            drawn_decorations.add((gx, gy))
+                        is_sel = id(deco) in selected_ids
+                        if (gx, gy) not in drawn_decorations or is_sel:
+                            outline = "yellow" if is_sel else ""
+                            width = 2 if is_sel else 1
+                            id_deco = create_rect(x-3, y-3, x+3, y+3, fill="green", outline=outline, width=width, tags="decoration")
+                            self.item_data_map[id_deco] = deco
+                            if not is_sel: drawn_decorations.add((gx, gy))
 
             # Render Paths (Optimized poly-line rendering)
             paths = layer.get('paths', [])
@@ -1300,8 +1700,8 @@ TIPS:
                                     all_coords.extend(seg_pts)
                         
                         if all_coords:
-                            id = create_line(*all_coords, fill="purple", width=2, tags="path")
-                            self.item_data_map[id] = path
+                            path_id = create_line(*all_coords, fill="purple", width=2, tags="path")
+                            self.item_data_map[path_id] = path
 
         # Render GooStarts (Yellow) from XML
         for i, gs in enumerate(self.goostarts):
@@ -1310,14 +1710,16 @@ TIPS:
             y = center_y + gs_y * scale
             if canv_l < x < canv_r and canv_t < y < canv_b:
                 tag = f"gs_{i}"
+                # Use the actual data reference to allow persistent selection
+                gs_data = gs['data']
+                is_sel = id(gs_data) in selected_ids
+                
                 # Use two solid ovals to simulate an outline without using 'outline' parameter
-                # This bypasses the Tkinter 1px pixel-leak bug
-                id_border = create_oval(x-9, y-9, x+9, y+9, fill="orange", outline="", tags=("goostart", tag))
+                # Use 'red' for selected GooStart highlight
+                id_border = create_oval(x-9, y-9, x+9, y+9, fill="red" if is_sel else "orange", outline="", tags=("goostart", tag))
                 id_back = create_oval(x-7, y-7, x+7, y+7, fill="yellow", outline="", tags=("goostart", tag))
                 id_text = create_text(x, y, text="G", fill="black", font=("tahoma", "8", "bold"), tags=("goostart", tag))
                 
-                # Use a copy of the dictionary to avoid polluting with editor-only keys
-                gs_data = gs['data'].copy()
                 self.item_data_map[id_border] = gs_data
                 self.item_data_map[id_back] = gs_data
                 self.item_data_map[id_text] = gs_data
@@ -1342,16 +1744,24 @@ TIPS:
 
     # Optimized Pan and Zoom
     def on_left_click_press(self, event):
+        self.canvas.focus_set() # Take focus away from dropdowns/entry widgets
         self.last_x = event.x
         self.last_y = event.y
         self.is_dragging = False
-        self.selected_item = None
+        self.selection_start = (event.x, event.y)
 
         if self.preview_mode.get():
             return
 
+        # Check modifiers for multi-select (Shift, Alt, or Control)
+        shift_held = (event.state & 0x1) != 0
+        control_held = (event.state & 0x4) != 0
+        alt_held = (event.state & 0x20000) != 0 or (event.state & 0x8) != 0
+        multi_select = shift_held or control_held or alt_held
+
         # Check for items to drag
         items = self.canvas.find_overlapping(event.x-3, event.y-3, event.x+3, event.y+3)
+        found_obj = None
         if items:
             for item_id in reversed(items):
                 tags = self.canvas.gettags(item_id)
@@ -1364,49 +1774,264 @@ TIPS:
                     if data.get("type") == "GooStart" and data.get("source") == "Multilevel XML":
                         continue # Skip multilevel goostarts as they are read-only
                     
-                    self.selected_item = item_id
-                    self.is_dragging = True
-                    self.push_state() # Save state before moving
-                    
-                    # Apply group raising if it's a grouped item
-                    group_tag = next((t for t in tags if t.startswith("gs_")), None)
-                    if group_tag:
-                        self.canvas.tag_raise(group_tag)
-                    else:
-                        self.canvas.tag_raise(item_id)
-                    return # Exit early
+                    found_obj = data
+                    break
+
+        if found_obj:
+            if multi_select:
+                # Toggle selection
+                if id(found_obj) in [id(o) for o in self.selection]:
+                    self.selection = [o for o in self.selection if o is not found_obj]
+                else:
+                    self.selection.append(found_obj)
+            else:
+                # Normal click: if clicking outside current selection, reset it
+                if id(found_obj) not in [id(o) for o in self.selection]:
+                    self.selection = [found_obj]
+            
+            if self.selection:
+                self.is_dragging = True
+                self.push_state() # Save state before moving
+                
+                self.render_level() # Update highlights (RECREATES IDs)
+                
+                # Performance optimization: pre-calculate IDs for dragging AFTER RENDER
+                sel_ids = {id(o) for o in self.selection}
+                self.dragging_targets = []
+                seen_targets = set()
+                for cid, data in self.item_data_map.items():
+                    if id(data) in sel_ids:
+                        tags = self.canvas.gettags(cid)
+                        group_tag = next((t for t in tags if t.startswith("gs_")), None)
+                        target = group_tag if group_tag else cid
+                        if target not in seen_targets:
+                            self.dragging_targets.append(target)
+                            seen_targets.add(target)
+                            self.canvas.tag_raise(target)
+        else:
+            if not multi_select:
+                self.selection = []
+                self.render_level()
 
     def on_left_click_move(self, event):
         dx = event.x - self.last_x
         dy = event.y - self.last_y
         
-        if self.is_dragging and self.selected_item:
-            # Check if it's a grouped item (like goostart)
-            tags = self.canvas.gettags(self.selected_item)
-            group_tag = next((t for t in tags if t.startswith("gs_")), None)
+        if self.is_dragging and self.selection:
+            # Move all selected items via pre-calculated targets
+            for target in getattr(self, 'dragging_targets', []):
+                self.canvas.move(target, dx, dy)
+        elif self.selection_start and not self.is_dragging:
+            # Box selection
+            if self.selection_rect:
+                self.canvas.delete(self.selection_rect)
             
-            if group_tag:
-                self.canvas.move(group_tag, dx, dy)
-            else:
-                self.canvas.move(self.selected_item, dx, dy)
+            x1, y1 = self.selection_start
+            x2, y2 = event.x, event.y
+            self.selection_rect = self.canvas.create_rectangle(x1, y1, x2, y2, outline="grey", dash=(4,4), tags="selection_box")
             
         self.last_x = event.x
         self.last_y = event.y
 
     def on_left_click_release(self, event):
-        if self.is_dragging and self.selected_item:
-            self.update_object_position(self.selected_item)
+        if self.is_dragging and self.selection:
+            # Update all selected objects
+            sel_ids = {id(o) for o in self.selection}
+            updated_objs = set()
+
+            for cid, data in self.item_data_map.items():
+                if id(data) in sel_ids and id(data) not in updated_objs:
+                    self.update_object_position(cid)
+                    updated_objs.add(id(data))
+                    
             self.is_dragging = False
-            self.selected_item = None
-            # Force a clean render to remove any dragging artifacts
-            self.canvas.delete("drag_hint")
+            self.dragging_targets = []
             self.render_level()
+        elif self.selection_start:
+            if self.selection_rect:
+                coords = self.canvas.coords(self.selection_rect)
+                self.canvas.delete(self.selection_rect)
+                self.selection_rect = None
+                
+                # Area-based select
+                items = self.canvas.find_enclosed(*coords)
+                new_items = []
+                for item_id in items:
+                    if item_id in self.item_data_map:
+                        data = self.item_data_map[item_id]
+                        if id(data) not in [id(o) for o in new_items]:
+                            new_items.append(data)
+                
+                shift_held = (event.state & 0x1) != 0
+                control_held = (event.state & 0x4) != 0
+                alt_held = (event.state & 0x20000) != 0 or (event.state & 0x8) != 0
+                
+                if shift_held or control_held or alt_held:
+                    for item in new_items:
+                        if id(item) not in [id(o) for o in self.selection]:
+                            self.selection.append(item)
+                else:
+                    self.selection = new_items
+                
+                self.render_level()
+            
+        self.selection_start = None
+
+    def copy_selected(self, event=None):
+        if self.preview_mode.get(): 
+            return
+
+        # Use current selection OR item under mouse
+        targets = self.selection
+        if not targets:
+            # Check under mouse
+            pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+            pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+            items = self.canvas.find_overlapping(pointer_x-3, pointer_y-3, pointer_x+3, pointer_y+3)
+            if items:
+                for item_id in reversed(items):
+                    if item_id in self.item_data_map:
+                        targets = [self.item_data_map[item_id]]
+                        break
+
+        if targets:
+            clipboard_data = []
+            
+            avg_x, avg_y = 0.0, 0.0
+            valid_objs = []
+            ent_scale = self.ent_scale_var.get()
+            
+            for obj in targets:
+                # Find type and pos
+                obj_type = None
+                iwu_x, iwu_y = 0.0, 0.0
+                
+                if 'pos_x' in obj: # Wall
+                    obj_type = "wall"
+                    iwu_x, iwu_y = obj['pos_x'], obj['pos_y']
+                elif 'position' in obj: # Ent/Deco
+                    obj_type = "entity" if 'vec' in obj else "decoration"
+                    if obj_type == "entity":
+                        iwu_x, iwu_y = obj['position'][0] * ent_scale, obj['position'][1] * ent_scale
+                    else:
+                        iwu_x, iwu_y = obj['position'][0], obj['position'][1]
+                
+                if obj_type:
+                    valid_objs.append({
+                        'type': obj_type,
+                        'data': copy.deepcopy(obj),
+                        'iwu_pos': (iwu_x, iwu_y)
+                    })
+                    avg_x += iwu_x
+                    avg_y += iwu_y
+            
+            if valid_objs:
+                avg_x /= len(valid_objs)
+                avg_y /= len(valid_objs)
+                
+                # Store relative offsets from selection center in IWU
+                for item in valid_objs:
+                    item['offset'] = (item['iwu_pos'][0] - avg_x, item['iwu_pos'][1] - avg_y)
+                
+                self.clipboard = {
+                    'mode': 'multi' if len(valid_objs) > 1 else 'single',
+                    'items': valid_objs
+                }
+                self.status_var.set(f"Copied {len(valid_objs)} items.")
+            else:
+                self.status_var.set("No valid items to copy.")
+
+    def paste_item(self, event=None, canvas_x=None, canvas_y=None):
+        if self.preview_mode.get(): 
+            return
+        if not self.clipboard or not self.level_data:
+            return
+
+        try:
+            self.push_state()
+            
+            # Calculate base position in world coordinates (IWU)
+            width = self.canvas.winfo_width()
+            height = self.canvas.winfo_height()
+            scale = 5.0 * self.scale
+            center_x = width / 2 + self.offset_x
+            center_y = height / 2 + self.offset_y
+            ent_scale = self.ent_scale_var.get()
+
+            if canvas_x is None or canvas_y is None:
+                pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+                pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+                if not (0 <= pointer_x <= width and 0 <= pointer_y <= height):
+                    pointer_x, pointer_y = width/2, height/2
+                canvas_x, canvas_y = pointer_x, pointer_y
+
+            # Base world coordinates for the paste 'center'
+            base_iwu_x = (canvas_x - center_x) / scale
+            base_iwu_y = (canvas_y - center_y) / scale
+            
+            new_selection = []
+            ent_scale = self.ent_scale_var.get()
+            
+            for item in self.clipboard.get('items', []):
+                new_data = copy.deepcopy(item['data'])
+                obj_type = item['type']
+                off_x, off_y = item['offset']
+                
+                # New world position (IWU)
+                target_iwu_x = base_iwu_x + off_x
+                target_iwu_y = base_iwu_y + off_y
+
+                if obj_type == "entity":
+                    new_data['position'] = [target_iwu_x / ent_scale, target_iwu_y / ent_scale]
+                elif obj_type == "wall":
+                    new_data['pos_x'] = target_iwu_x
+                    new_data['pos_y'] = target_iwu_y
+                    # Assign new unique wall_id
+                    max_id = 0
+                    for layer in self.level_data.get('layers', []):
+                        for wall in layer.get('walls', []):
+                            max_id = max(max_id, wall.get('wall_id', 0))
+                    new_data['wall_id'] = max_id + 1
+                else: # decoration
+                    new_data['position'] = [target_iwu_x, target_iwu_y]
+
+                # Auto-find the best layer for this specific type (most crowded)
+                layers = self.level_data.get('layers', [])
+                type_to_key = {"entity": "entities", "wall": "walls", "decoration": "decorations"}
+                list_key = type_to_key.get(obj_type, obj_type + "s")
+                
+                target_layer_idx = 0
+                max_count = -1
+                for idx, layer in enumerate(layers):
+                    count = len(layer.get(list_key, []))
+                    if count > max_count:
+                        max_count = count
+                        target_layer_idx = idx
+
+                if 0 <= target_layer_idx < len(layers):
+                    layers[target_layer_idx].setdefault(list_key, []).append(new_data)
+                    new_selection.append(new_data)
+            
+            if new_selection:
+                self.selection = new_selection
+                self.render_level()
+                self.status_var.set(f"Pasted {len(new_selection)} items.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to paste: {e}")
+            import traceback
+            traceback.print_exc()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to paste: {e}")
 
     def on_right_click_press(self, event):
+        self.canvas.focus_set() # Take focus away from entries/dropdowns
         self.last_x = event.x
         self.last_y = event.y
         self.panning = True
         self.right_click_moved = False
+        
+        # New context menu support for empty canvas (Paste)
+        self.right_click_event = event
 
     def on_right_click_move(self, event):
         dx = event.x - self.last_x
@@ -1509,18 +2134,119 @@ TIPS:
         if items:
             for item_id in reversed(items):
                 if item_id in self.item_data_map:
-                    # Check if it's an editable GooStart
-                    tags = self.canvas.gettags(item_id)
                     data = self.item_data_map[item_id]
                     
-                    if "goostart" in tags and data.get("source") == "Multilevel XML":
-                        messagebox.showinfo("Read Only", "This GooStart comes from a multilevel XML and cannot be edited here.")
-                        return
+                    # If clicking an item NOT in current selection, select it solely
+                    if id(data) not in [id(o) for o in self.selection]:
+                        self.selection = [data]
+                        self.render_level()
+
+                    tags = self.canvas.gettags(item_id)
                     
-                    # Pass the gs_entry if it's a GooStart
-                    gs_entry = self.item_to_obj.get(item_id) if "goostart" in tags else None
-                    self.open_edit_dialog(data, item_id, gs_entry)
+                    # Create a context menu
+                    menu = tk.Menu(self.root, tearoff=0)
+                    
+                    # Check for editable status
+                    is_multilevel_gs = "goostart" in tags and data.get("source") == "Multilevel XML"
+                    preview = self.preview_mode.get()
+                    multi = len(self.selection) > 1
+
+                    if not multi:
+                        # Single item menu
+                        obj_to_edit = data
+                        id_to_edit = item_id
+                        gs_to_edit = self.item_to_obj.get(item_id) if "goostart" in tags else None
+
+                        label = "View Properties (Read Only)" if is_multilevel_gs else "Edit Properties"
+                        menu.add_command(label=label, 
+                                         command=lambda: self.open_edit_dialog(obj_to_edit, id_to_edit, gs_to_edit))
+                    else:
+                        # Multi-item menu
+                        menu.add_command(label=f"Selected {len(self.selection)} items", state="disabled")
+                    
+                    if not is_multilevel_gs:
+                        menu.add_command(label=f"Copy Selection ({len(self.selection)})", command=self.copy_selected)
+                        
+                    if not preview and not is_multilevel_gs:
+                        menu.add_separator()
+                        del_label = "Delete Selection" if multi else "Delete"
+                        menu.add_command(label=del_label, command=self.delete_selected)
+
+                    if is_multilevel_gs and not multi:
+                        menu.add_separator()
+                        menu.add_command(label="Source: Multilevel XML", state="disabled")
+
+                    menu.post(event.x_root, event.y_root)
+                    self.context_menu = menu
                     return
+        
+        # If right clicked on empty space
+        if not self.right_click_moved:
+            menu = tk.Menu(self.root, tearoff=0)
+            
+            # Store coordinates
+            right_x, right_y = event.x, event.y
+            
+            if not self.preview_mode.get():
+                menu.add_command(label="Add Entity here (Ctrl+E)", command=lambda: self.add_entity(right_x, right_y))
+                menu.add_command(label="Add Wall here (Ctrl+W)", command=lambda: self.add_wall(right_x, right_y))
+                menu.add_command(label="Add Decoration here (Ctrl+D)", command=lambda: self.add_decoration(right_x, right_y))
+                
+                if self.clipboard:
+                    menu.add_separator()
+                    clip_count = len(self.clipboard.get('items', []))
+                    label = f"Paste {clip_count} items (Ctrl+V)" if clip_count > 1 else f"Paste item (Ctrl+V)"
+                    menu.add_command(label=label, command=lambda: self.paste_item(canvas_x=right_x, canvas_y=right_y))
+            else:
+                menu.add_command(label="Preview Mode: Creation Disabled", state="disabled")
+                
+            menu.post(event.x_root, event.y_root)
+            self.context_menu = menu
+
+    def delete_selected(self):
+        if not self.selection:
+            return
+        
+        preview = self.preview_mode.get()
+        if preview:
+            return
+
+        count = len(self.selection)
+        msg = f"Are you sure you want to delete {count} selected items?" if count > 1 else "Are you sure you want to delete this item?"
+        
+        if messagebox.askyesno("Confirm Delete", msg):
+            self.push_state()
+            
+            sel_ids = [id(o) for o in self.selection]
+            
+            for layer in self.level_data.get('layers', []):
+                for key in ['entities', 'walls', 'decorations']:
+                    if key in layer:
+                        layer[key] = [obj for obj in layer[key] if id(obj) not in sel_ids]
+            
+            self.selection = []
+            self.render_level()
+            self.status_var.set(f"Deleted {count} items.")
+
+    def on_delete_key(self, event):
+        if self.preview_mode.get():
+            return
+
+        if self.selection:
+            self.delete_selected()
+            return
+
+        # Fallback to item under mouse if nothing selected
+        items = self.canvas.find_overlapping(event.x-3, event.y-3, event.x+3, event.y+3)
+        if not items:
+            return
+            
+        for item_id in reversed(items):
+            if item_id in self.item_data_map:
+                data = self.item_data_map[item_id]
+                self.selection = [data]
+                self.delete_selected()
+                break
 
     def open_edit_dialog(self, data, item_id, gs_entry=None):
         preview = self.preview_mode.get()
