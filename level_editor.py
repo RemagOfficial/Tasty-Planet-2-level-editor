@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import shutil
+import time
 import copy
 import zipfile
 import tempfile
@@ -24,8 +25,12 @@ class LevelEditor:
         self.xml_path = None
         self.goostarts = [] # List of (x, y) coordinates
         self.multilevel_data = {} # name -> {'prev_pos': (x, y), 'gootostart': bool}
+        self.multilevel_lookup = {} # level_name -> [xml_filename, node_attributes]
+        self.xml_trees = {} # xml_filename -> {'tree': ET, 'path': full_path}
+        self.ml_file_var = tk.StringVar()
         self.entity_types = [] # List of unique entity types discovered
         self.tile_types = [] # List of unique tile types discovered
+        self.selected_entity_type = tk.StringVar(value="CHANGEME")
         
         # State
         self.scale = 1.0
@@ -55,6 +60,8 @@ class LevelEditor:
         self.type_names = ["walls", "entities", "decorations", "paths"]
         self.preview_mode = tk.BooleanVar(value=False)
         
+        self.ml_editor_window = None # Track the Toplevel instance
+        self.auto_open_ml = True # Control automatic opening
         self.assets_root = None
         self.levels_dir = None
         
@@ -68,9 +75,12 @@ class LevelEditor:
 
         self.config_path = os.path.join(base_dir, "config.json")
         self.backup_dir = os.path.join(base_dir, "backups")
+        self.ml_backup_dir = os.path.join(self.backup_dir, "multilevels")
         
         if not os.path.exists(self.backup_dir):
             os.makedirs(self.backup_dir)
+        if not os.path.exists(self.ml_backup_dir):
+            os.makedirs(self.ml_backup_dir)
 
         # UI Components
         self.create_widgets()
@@ -211,7 +221,10 @@ class LevelEditor:
         self.root.after(100, lambda: process_batch(0))
 
     def scan_multilevels(self):
-        self.multilevel_data = {}
+        self.multilevel_data = {} # name -> {'prev_pos': (x, y), 'gootostart': bool}
+        self.multilevel_lookup = {} # level_name -> list of [xml_filename, node_attributes]
+        self.xml_trees = {} # xml_filename -> {'tree': ET, 'path': full_path}
+        
         ml_dir = os.path.join(self.levels_dir, "multilevels")
         if not os.path.isdir(ml_dir):
             return
@@ -219,18 +232,29 @@ class LevelEditor:
         for f in os.listdir(ml_dir):
             if not f.lower().endswith(".xml"):
                 continue
+            
+            # Skip backup files if they exist in this dir
+            if "original" in f.lower(): continue
                 
             try:
-                tree = ET.parse(os.path.join(ml_dir, f))
+                full_path = os.path.join(ml_dir, f)
+                tree = ET.parse(full_path)
                 root = tree.getroot()
                 if root.tag != 'multilevel':
                     continue
+                
+                self.xml_trees[f] = {'tree': tree, 'path': full_path}
                 
                 prev_pos = (0.0, 0.0)
                 for level_node in root.findall("level"):
                     name = level_node.get("name")
                     if not name:
                         continue
+                    
+                    attrs = dict(level_node.attrib)
+                    if name not in self.multilevel_lookup:
+                        self.multilevel_lookup[name] = []
+                    self.multilevel_lookup[name].append([f, attrs])
                         
                     posx = float(level_node.get("posx", 0))
                     posy = float(level_node.get("posy", 0))
@@ -268,6 +292,24 @@ class LevelEditor:
         
         if os.path.exists(bin_path):
             self.load_level_from_path(bin_path, xml_path)
+            
+        # Update Chain XML state for the selected level (internal only)
+        infos = self.multilevel_lookup.get(name, [])
+        if infos:
+            choices = sorted(list(set([i[0] for i in infos])))
+            if choices:
+                target_xml = choices[0]
+                self.ml_file_var.set(target_xml)
+                
+                # Check if editor is already visible
+                editor_visible = self.ml_editor_window and self.ml_editor_window.winfo_exists()
+                
+                # Update editor if auto-open is on OR if it's already open
+                if self.auto_open_ml or editor_visible:
+                    # Delay slightly to ensure level load completes
+                    self.root.after(100, lambda: self.show_multilevel_editor(target_xml))
+        else:
+            self.ml_file_var.set("")
 
     def load_level_from_path(self, bin_path, xml_path=None):
         # Create initial backups if they don't exist
@@ -282,6 +324,16 @@ class LevelEditor:
                 xml_orig = os.path.join(self.backup_dir, xml_name)
                 if not os.path.exists(xml_orig):
                     shutil.copy2(xml_path, xml_orig)
+
+            # Back up related multilevel XMLs
+            level_name = os.path.splitext(bin_name)[0]
+            if level_name in self.multilevel_lookup:
+                for xml_file, _ in self.multilevel_lookup[level_name]:
+                    ml_path = os.path.join(self.levels_dir, "multilevels", xml_file)
+                    ml_orig = os.path.join(self.ml_backup_dir, xml_file)
+                    if os.path.exists(ml_path) and not os.path.exists(ml_orig):
+                        shutil.copy2(ml_path, ml_orig)
+                        
         except Exception as e:
             print(f"Backup failed: {e}")
 
@@ -338,11 +390,51 @@ class LevelEditor:
             if xml_orig and os.path.exists(xml_orig):
                 shutil.copy2(xml_orig, xml_path)
             
+            # Restore related multilevel XMLs
+            level_name = os.path.splitext(bin_name)[0]
+            if level_name in self.multilevel_lookup:
+                for xml_file, _ in self.multilevel_lookup[level_name]:
+                    ml_orig = os.path.join(self.ml_backup_dir, xml_file)
+                    ml_path = os.path.join(self.levels_dir, "multilevels", xml_file)
+                    if os.path.exists(ml_orig):
+                        shutil.copy2(ml_orig, ml_path)
+            
+            # Re-scan multilevels to pick up restored files
+            self.scan_multilevels()
+            
             # Reload
             self.load_level_from_path(bin_path, xml_path)
-            messagebox.showinfo("Success", f"'{bin_name}' restored to original state.")
+            messagebox.showinfo("Success", f"'{bin_name}' and related multilevel files restored to original state.")
         except Exception as e:
             messagebox.showerror("Error", f"Restore failed: {e}")
+
+    def restore_all_multilevels(self):
+        if not self.levels_dir:
+            messagebox.showwarning("Warning", "Assets folder not set.")
+            return
+
+        ml_dir = os.path.join(self.levels_dir, "multilevels")
+        if not os.path.isdir(self.ml_backup_dir):
+            messagebox.showinfo("Wait", "No multilevel backups found.")
+            return
+
+        files = os.listdir(self.ml_backup_dir)
+        if not files:
+            messagebox.showinfo("Wait", "No multilevel backups available.")
+            return
+
+        confirm = messagebox.askyesno("Confirm Restore", 
+            f"This will restore all {len(files)} multilevel XML files from your session backup. Continue?")
+        if not confirm: return
+
+        try:
+            for f in files:
+                src = os.path.join(self.ml_backup_dir, f)
+                dst = os.path.join(ml_dir, f)
+                shutil.copy2(src, dst)
+            
+            self.scan_multilevels()
+            messagebox.showinfo("Success", f"Restored {len(files)} multilevel XML files.")
         except Exception as e:
             messagebox.showerror("Error", f"Restore failed: {e}")
 
@@ -398,6 +490,7 @@ class LevelEditor:
         file_menu.add_command(label="Save to APK (beta)...", command=self.save_to_apk)
         file_menu.add_separator()
         file_menu.add_command(label="Restore to Original", command=self.restore_current_level)
+        file_menu.add_command(label="Restore All Multilevel XMLs", command=self.restore_all_multilevels)
         file_menu.add_separator()
         file_menu.add_command(label="Select Assets Folder", command=self.select_assets_root)
         file_menu.add_separator()
@@ -418,6 +511,8 @@ class LevelEditor:
         edit_menu.add_separator()
         edit_menu.add_command(label="Bulk Replace Entity Type", command=self.show_bulk_replace_entities)
         edit_menu.add_command(label="Bulk Replace Tile Type", command=self.show_bulk_replace_tiles)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Multilevel XML Editor", command=self.show_multilevel_editor, accelerator="Ctrl+M")
         edit_menu.add_separator()
         edit_menu.add_command(label="Reset Camera/View", command=self.reset_view)
 
@@ -515,6 +610,8 @@ class LevelEditor:
         self.root.bind("<Control-W>", lambda e: self.add_wall())
         self.root.bind("<Control-d>", lambda e: self.add_decoration())
         self.root.bind("<Control-D>", lambda e: self.add_decoration())
+        self.root.bind("<Control-m>", lambda e: self.show_multilevel_editor())
+        self.root.bind("<Control-M>", lambda e: self.show_multilevel_editor())
         self.canvas.bind("<Delete>", self.on_delete_key)
 
     def on_delete_key(self, event):
@@ -802,8 +899,11 @@ class LevelEditor:
             if all_prios:
                 avg_priority = int(sum(all_prios) / len(all_prios))
 
+            ent_type = self.selected_entity_type.get()
+            if not ent_type: ent_type = "CHANGEME"
+
             new_ent = {
-                'type': 'CHANGEME',
+                'type': ent_type,
                 'position': [world_x, world_y],
                 'field_158': 0,
                 'field_15c': 0,
@@ -1180,23 +1280,12 @@ class LevelEditor:
             
             # Auto-Signing Opportunity
             signed_msg = ""
-            # Ask if the user wants to sign, providing context about why they might say no
-            choice = messagebox.askyesnocancel("Sign APK", 
-                "APK updated! Would you like to automatically sign the APK now?\n\n"
-                "Yes: Sign with a debug key (Installable immediately).\n"
-                "No: Save without signing (You must sign it manually later).\n"
-                "Cancel: Abort the process.")
-            
-            if choice is True: # Yes
+            if messagebox.askyesno("Sign APK", "APK updated! Would you like to automatically sign the APK now? (Requires Java / jarsigner to be in your PATH)"):
                 success, msg = self.sign_apk(apk_path)
                 if success:
                     signed_msg = "\n\nAPK has been SIGNED with a debug key and should be installable."
                 else:
                     signed_msg = f"\n\nAutomatic signing failed: {msg}\nYou will need to sign it manually."
-            elif choice is False: # No
-                signed_msg = "\n\nAPK saved WITHOUT signing. You must sign it before installing."
-            else: # Cancel
-                return
 
             messagebox.showinfo("Success", f"APK Updated successfully!\nSaved to: {target_dir}{signed_msg}")
             self.status_var.set(f"Published level to APK: {apk_path}")
@@ -1241,23 +1330,12 @@ class LevelEditor:
                         break
             
             if not jarsigner:
-                return False, (
-                    "Could not find 'jarsigner.exe'.\n\n"
-                    "This tool is part of the Java Development Kit (JDK) and is required to make the APK installable.\n\n"
-                    "HOW TO FIX:\n"
-                    "1. Install the Java JDK (Recommended: Adoptium Temurin or Oracle JDK).\n"
-                    "2. Add the JDK 'bin' folder to your Windows System PATH environment variable.\n"
-                    "3. Or install it to the default 'C:\\Program Files\\Java' directory."
-                )
+                return False, "jarsigner tool not found. Please ensure Java JDK is installed and in your PATH."
 
             # 2. Check if keystore exists, if not, create it
             if not os.path.exists(keystore_path):
                 if not keytool:
-                    return False, (
-                        "Could not find 'keytool.exe'.\n\n"
-                        "This tool is required to create a new signing key (debug.keystore).\n"
-                        "Please ensure the Java JDK is correctly installed and its 'bin' folder is in your PATH."
-                    )
+                    return False, "Keystore missing and keytool not found to create one."
                 
                 cmd = [
                     keytool, "-genkey", "-v", 
@@ -1343,6 +1421,331 @@ TIPS:
         text_widget.pack(fill=tk.BOTH, expand=True)
         
         tk.Button(dialog, text="Got it!", command=dialog.destroy, width=15).pack(pady=10)
+
+    def jump_to_level(self, level_name):
+        if level_name in self.level_combo['values']:
+            self.level_var.set(level_name)
+            self.on_level_selected()
+        else:
+            messagebox.showerror("Error", f"Level '{level_name}' not found in levels directory.")
+
+    def show_multilevel_editor(self, xml_file=None):
+        if not self.levels_dir:
+            messagebox.showinfo("Wait", "Please select an assets folder first.")
+            return
+
+        level_name = self.level_var.get()
+        
+        # Use dropdown value if not passed
+        if not xml_file:
+            xml_file = self.ml_file_var.get()
+
+        if not xml_file:
+            # Fallback: ask user to pick an XML from the multilevels folder
+            ml_dir = os.path.join(self.levels_dir, "multilevels")
+            path = filedialog.askopenfilename(initialdir=ml_dir, title="Select Multilevel XML to Edit", filetypes=[("XML Files", "*.xml")])
+            if not path: return
+            xml_file = os.path.basename(path)
+            # Ensure it is indexed
+            self.scan_multilevels()
+
+        if xml_file not in self.xml_trees:
+            # Try one last resort scan
+            self.scan_multilevels()
+            if xml_file not in self.xml_trees:
+                # Don't show error if automatic opening failed (e.g. no XML found)
+                return
+
+        try:
+            # Check if window already exists
+            if self.ml_editor_window and self.ml_editor_window.winfo_exists():
+                # Refresh existing window without closing it
+                editor = self.ml_editor_window
+                for widget in editor.winfo_children():
+                    widget.destroy()
+            else:
+                editor = tk.Toplevel(self.root)
+                self.ml_editor_window = editor
+                
+                def handle_close():
+                    self.auto_open_ml = False # User manually closed, stop auto-opening
+                    editor.destroy()
+                
+                editor.protocol("WM_DELETE_WINDOW", handle_close)
+
+            xml_data = self.xml_trees[xml_file]
+            tree = xml_data['tree']
+            root = tree.getroot()
+
+            self.auto_open_ml = True # User opened or it auto-opened, keep tracking changes
+            editor.title(f"Multilevel Editor - {xml_file}")
+            editor.geometry("1100x750")
+            
+            main_frame = tk.Frame(editor)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            # File Selector inside editor
+            top_controls = tk.Frame(main_frame)
+            top_controls.pack(fill=tk.X, pady=(0, 10))
+            
+            tk.Label(top_controls, text="Working XML:", font=("tahoma", 9, "bold")).pack(side=tk.LEFT)
+            
+            # Filter XMLs to only show those that include the current level
+            valid_xmls = []
+            if level_name and level_name in self.multilevel_lookup:
+                valid_xmls = sorted(list(set([i[0] for i in self.multilevel_lookup[level_name]])))
+            
+            # Ensure the current xml_file is in the list
+            if xml_file not in valid_xmls:
+                valid_xmls.append(xml_file)
+                valid_xmls.sort()
+
+            ml_selector = ttk.Combobox(top_controls, values=valid_xmls, width=30, state="readonly")
+            ml_selector.set(xml_file)
+            self.ml_file_var.set(xml_file)
+            ml_selector.pack(side=tk.LEFT, padx=10)
+            
+            def on_xml_switch(event):
+                target = ml_selector.get()
+                if target:
+                    self.ml_file_var.set(target)
+                    self.show_multilevel_editor(target)
+                
+            ml_selector.bind("<<ComboboxSelected>>", on_xml_switch)
+
+            # Header with XML attributes
+            header = tk.LabelFrame(main_frame, text="XML Global Settings", padx=10, pady=5)
+            header.pack(fill=tk.X, pady=(0, 10))
+            
+            global_entries = {}
+            # Simple grid for top-level attributes
+            row, col = 0, 0
+            important_attrs = ['timelimit', 'victorytype', 'goldtime', 'silvertime', 'bronzetime', 'levelmusicscript']
+            for attr in important_attrs:
+                val = root.get(attr, "")
+                tk.Label(header, text=f"{attr}:").grid(row=row, column=col, sticky=tk.W)
+                e = tk.Entry(header, width=15)
+                e.insert(0, val)
+                e.grid(row=row, column=col+1, padx=5, pady=2)
+                global_entries[attr] = e
+                col += 2
+                if col >= 6:
+                    col = 0
+                    row += 1
+
+            # Level list area
+            list_frame = tk.LabelFrame(main_frame, text="Levels in Chain")
+            list_frame.pack(fill=tk.BOTH, expand=True)
+
+            canvas = tk.Canvas(list_frame)
+            scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+            scroll_content = tk.Frame(canvas)
+
+            scroll_content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=scroll_content, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            # Mousewheel support for multilevel editor scroll
+            def _on_mousewheel(event):
+                try:
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                except:
+                    pass
+            editor.bind("<MouseWheel>", _on_mousewheel)
+
+            bin_list = sorted([f[:-4] for f in os.listdir(self.levels_dir) if f.lower().endswith(".bin")])
+
+            level_rows = []
+
+            def build_level_list():
+                for widget in scroll_content.winfo_children():
+                    widget.destroy()
+                level_rows.clear()
+                
+                # Re-parse or find nodes
+                levels = root.findall("level")
+                for i, node in enumerate(levels):
+                    f = tk.Frame(scroll_content, bd=1, relief=tk.RIDGE, pady=5, padx=5)
+                    f.pack(fill=tk.X, pady=2)
+                    
+                    # Drag/Reorder buttons (simplified as Up/Down)
+                    btn_frame = tk.Frame(f)
+                    btn_frame.pack(side=tk.LEFT, padx=5)
+                    tk.Button(btn_frame, text="▲", command=lambda idx=i: move_level(idx, -1)).pack(side=tk.TOP)
+                    tk.Button(btn_frame, text="▼", command=lambda idx=i: move_level(idx, 1)).pack(side=tk.BOTTOM)
+
+                    # Jump to level button
+                    l_name = node.get("name", "")
+                    tk.Button(f, text="→", font=("tahoma", 8, "bold"), 
+                            command=lambda n=l_name: self.jump_to_level(n)).pack(side=tk.LEFT, padx=2)
+
+                    tk.Label(f, text=f"L{i+1}:", font=("tahoma", 8, "bold")).pack(side=tk.LEFT, padx=5)
+                    
+                    # Name Dropdown
+                    name_var = tk.StringVar(value=node.get("name", ""))
+                    cb = ttk.Combobox(f, textvariable=name_var, values=bin_list, width=25)
+                    cb.pack(side=tk.LEFT, padx=5)
+                    
+                    # Other attributes in small entries
+                    attr_frame = tk.Frame(f)
+                    attr_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                    
+                    row_data = {"node": node, "name_var": name_var, "entries": {}}
+                    
+                    # Define key attributes to show for each level
+                    sub_attrs = ['meterperpix', 'posx', 'posy', 'triggerarea', 'triggerspecial', 'gootostart']
+                    for j, attr in enumerate(sub_attrs):
+                        tk.Label(attr_frame, text=attr, font=("tahoma", 7)).grid(row=0, column=j)
+                        e = tk.Entry(attr_frame, width=14, font=("tahoma", 8))
+                        e.insert(0, node.get(attr, "0"))
+                        e.grid(row=1, column=j, padx=2)
+                        row_data["entries"][attr] = e
+                    
+                    # Delete button
+                    tk.Button(f, text="X", fg="red", command=lambda idx=i: remove_level(idx)).pack(side=tk.RIGHT, padx=5)
+                    
+                    level_rows.append(row_data)
+
+            def move_level(idx, direction):
+                levels = root.findall("level")
+                new_idx = idx + direction
+                if 0 <= new_idx < len(levels):
+                    # Swap entries in the XML tree
+                    node = levels[idx]
+                    root.remove(node)
+                    root.insert(new_idx, node)
+                    build_level_list()
+
+            def remove_level(idx):
+                levels = root.findall("level")
+                root.remove(levels[idx])
+                build_level_list()
+
+            def add_new_level():
+                new_name = add_level_var.get()
+                if not new_name:
+                    messagebox.showwarning("Wait", "Select a level from the dropdown first.")
+                    return
+                
+                # Create new node
+                new_node = ET.Element("level", {"name": new_name})
+                
+                # Smart data copy requirement
+                found_existing = None
+                if new_name in self.multilevel_lookup:
+                    found_existing = self.multilevel_lookup[new_name][0][1] 
+                
+                if found_existing:
+                    for k, v in found_existing.items():
+                        if k != "name": new_node.set(k, v)
+                    print(f"Copied attributes for {new_name} from existing multilevel entry.")
+                else:
+                    # Initial Defaults
+                    new_node.set("meterperpix", "0.01")
+                    new_node.set("posx", "0")
+                    new_node.set("posy", "0")
+                    new_node.set("triggerarea", "20000")
+                    new_node.set("triggerspecial", "-1")
+                    new_node.set("gootostart", "false")
+                
+                # Dynamic growth logic for meterperpix and triggerarea: 
+                # Use the average of all existing levels in the file as the increment step.
+                # This ensures the increase itself grows as more levels are added.
+                existing_levels = root.findall("level")
+                if existing_levels:
+                    try:
+                        # Handle meterperpix growth
+                        mpps = [float(l.get("meterperpix", 0)) for l in existing_levels]
+                        prev_mpp = mpps[-1]
+                        avg_step_mpp = sum(mpps) / len(mpps)
+                        new_node.set("meterperpix", f"{prev_mpp + avg_step_mpp:.4f}")
+                        
+                        # Handle triggerarea growth (10X slower growth requested)
+                        areas = [float(l.get("triggerarea", 0)) for l in existing_levels]
+                        prev_area = areas[-1]
+                        avg_step_area = (sum(areas) / len(areas)) / 10
+                        new_node.set("triggerarea", str(int(prev_area + avg_step_area)))
+                    except (ValueError, ZeroDivisionError):
+                        pass
+
+                root.append(new_node)
+                build_level_list()
+
+            def save_xml():
+                try:
+                    # Update global attributes
+                    for attr, entry in global_entries.items():
+                        root.set(attr, entry.get())
+                    
+                    # Update individual levels
+                    for row in level_rows:
+                        node = row["node"]
+                        node.set("name", row["name_var"].get())
+                        for attr, entry in row["entries"].items():
+                            node.set(attr, entry.get())
+                    
+                    # Save to file
+                    path = xml_data['path']
+                    # Create backup
+                    if os.path.exists(path):
+                        import shutil
+                        shutil.copy2(path, path + f".bak_{int(time.time())}")
+                    
+                    # ElementTree.write doesn't do pretty-printing easily in standard lib
+                    def indent_xml(elem, level=0):
+                        spacing = "\n" + level*"    "
+                        if len(elem):
+                            if not elem.text or not elem.text.strip():
+                                elem.text = spacing + "    "
+                            if not elem.tail or not elem.tail.strip():
+                                elem.tail = spacing
+                            last_child = None
+                            for last_child in elem:
+                                indent_xml(last_child, level+1)
+                            if last_child is not None:
+                                if not last_child.tail or not last_child.tail.strip():
+                                    last_child.tail = spacing
+                        else:
+                            if level and (not elem.tail or not elem.tail.strip()):
+                                elem.tail = spacing
+
+                    indent_xml(root)
+                    tree.write(path, encoding="utf-8", xml_declaration=True)
+                    
+                    # Re-scan to update editor's internal data
+                    self.scan_multilevels()
+                    messagebox.showinfo("Success", f"Saved multilevel XML to {os.path.basename(path)}")
+                except Exception as e:
+                    messagebox.showerror("Save Error", f"Failed to save XML: {e}")
+
+            # Toolbar for the multilevel editor
+            tools = tk.Frame(editor)
+            tools.pack(fill=tk.X, pady=10)
+            
+            # Add Level Section (Inline)
+            add_frame = tk.LabelFrame(tools, text="Add New Level to Chain")
+            add_frame.pack(side=tk.LEFT, padx=10)
+            
+            add_level_var = tk.StringVar()
+            add_combo = ttk.Combobox(add_frame, textvariable=add_level_var, values=bin_list, width=20, state="readonly")
+            add_combo.pack(side=tk.LEFT, padx=5, pady=5)
+            
+            tk.Button(add_frame, text="Add Select Level", command=add_new_level, bg="lightgreen").pack(side=tk.LEFT, padx=5, pady=5)
+            
+            tk.Button(tools, text="Restore to Session Original", 
+                      command=lambda: [self.restore_all_multilevels(), self.show_multilevel_editor()], 
+                      bg="#ff9999").pack(side=tk.RIGHT, padx=10, pady=5)
+            tk.Button(tools, text="SAVE CHANGES", command=save_xml, bg="orange", font=("tahoma", 9, "bold")).pack(side=tk.RIGHT, padx=10, pady=5)
+
+            build_level_list()
+        except Exception as e:
+            messagebox.showerror("Editor Error", f"An unexpected error occurred: {e}")
+            print(f"Multilevel Editor error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def show_level_overview(self):
         if not self.level_data:
@@ -2249,6 +2652,15 @@ TIPS:
                 break
 
     def open_edit_dialog(self, data, item_id, gs_entry=None):
+        # Resolve stale item_id if the canvas was redrawn (e.g. from right-click selection)
+        tags = self.canvas.gettags(item_id)
+        if not tags:
+            for cid, val in self.item_data_map.items():
+                if val is data:
+                    item_id = cid
+                    tags = self.canvas.gettags(item_id)
+                    break
+        
         preview = self.preview_mode.get()
         dialog = tk.Toplevel(self.root)
         dialog.title("Edit Properties" if not preview else "View Properties (Preview Mode)")
@@ -2290,7 +2702,7 @@ TIPS:
             row = len(entries)
             
             # Special handling for Decoration Tile Type (cell)
-            if k == 'cell' and "decoration" in self.canvas.gettags(item_id):
+            if k == 'cell' and "decoration" in tags:
                 tk.Label(scroll_frame, text="tile_type").grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
                 current_type = "Unknown"
                 if 0 <= v < len(self.level_data.get('tileTypes', [])):
@@ -2308,13 +2720,10 @@ TIPS:
             scroll_frame.grid_columnconfigure(1, weight=1)
             
             # Special handling for Entity Type dropdown
-            if k == 'type' and "entity" in self.canvas.gettags(item_id):
-                # Using readonly state to prevent typing errors and satisfy game constraints.
-                # Users can still use the arrow to select or press letters to jump to items.
+            if k == 'type' and "entity" in tags:
+                # Restrict to discovered entity types as game only supports those
                 entry = ttk.Combobox(scroll_frame, values=self.entity_types, state="readonly" if not preview else "disabled")
                 entry.set(str(v))
-                entry.grid(row=row, column=1, padx=5, pady=2, sticky=tk.EW)
-                entries[k] = entry
             else:
                 entry = tk.Entry(scroll_frame, state="normal" if not preview else "readonly")
                 # For dicts/lists, use json.dumps for easier editing
@@ -2329,7 +2738,6 @@ TIPS:
             
         def save_changes():
             # Validation
-            tags = self.canvas.gettags(item_id)
             if "entity" in tags:
                 type_entry = entries.get('type')
                 if type_entry and type_entry.get().strip().upper() == "CHANGEME":
